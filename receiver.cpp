@@ -182,6 +182,8 @@ public:
                            "(at block block #%u).\n",
                            block_idx_, MAX_CAPTURE_TIME, last_block_);
                 }
+
+                beacon_timestamp_ = carrier_det_->data().block->timestamp;
             }
 
         }
@@ -351,8 +353,16 @@ protected:
             // FIXME: We assume little endianness
 
             if (out_.file()) {
+                uint64_t ts_sec = beacon_timestamp_.tv_sec;
+                uint32_t ts_usec = beacon_timestamp_.tv_usec;
+
+                // write header
+                fwrite(reinterpret_cast<char*>(&ts_sec), 1, sizeof(ts_sec), out_.file());
+                fwrite(reinterpret_cast<char*>(&ts_usec), 1, sizeof(ts_usec), out_.file());
                 fwrite(reinterpret_cast<char*>(&beacon_), 1, sizeof(beacon_), out_.file());
                 fwrite(reinterpret_cast<char*>(&cycle_), 1, sizeof(cycle_), out_.file());
+
+                // write data
                 fwrite(corrected_corr_fft_.data(), sizeof(complex<float>), corr_size_, out_.file());
             }
         }
@@ -418,6 +428,9 @@ private:
     // Beacon pulses are used to relate samples of different receivers to each other.
     // Called "pulse" in Python code.
     int32_t beacon_ = -1;
+
+    // Timestamp of last beacon detection
+    struct timeval beacon_timestamp_;
 
     // Beacon Sample of Arrival
     double soa_ = 0;
