@@ -37,6 +37,9 @@ using namespace std;
 // time in seconds to capture after the first beacon detection
 #define MAX_CAPTURE_TIME 60
 
+#define OUTPUT_WINDOW_START 100
+#define OUTPUT_WINDOW_STOP 213
+
 
 // Angles are stored as a value between -0.5 and 0.5 to simplify normalisation
 // TODO: convert to class
@@ -353,17 +356,28 @@ protected:
             // FIXME: We assume little endianness
 
             if (out_.file()) {
-                uint64_t ts_sec = beacon_timestamp_.tv_sec;
-                uint32_t ts_usec = beacon_timestamp_.tv_usec;
+                uint16_t ts_sec = beacon_timestamp_.tv_sec % 86400;
+                uint8_t ts_usec = beacon_timestamp_.tv_usec % 100;
+                uint16_t beacon_id = beacon_;
+                uint16_t cycle = cycle_;
+
+                uint16_t start_idx = max(0, OUTPUT_WINDOW_START);
+                uint16_t stop_idx = (OUTPUT_WINDOW_STOP <= 0) ? corr_size_
+                                    : min((uint16_t)corr_size_, (uint16_t)OUTPUT_WINDOW_STOP);
 
                 // write header
                 fwrite(reinterpret_cast<char*>(&ts_sec), 1, sizeof(ts_sec), out_.file());
                 fwrite(reinterpret_cast<char*>(&ts_usec), 1, sizeof(ts_usec), out_.file());
-                fwrite(reinterpret_cast<char*>(&beacon_), 1, sizeof(beacon_), out_.file());
-                fwrite(reinterpret_cast<char*>(&cycle_), 1, sizeof(cycle_), out_.file());
+                fwrite(reinterpret_cast<char*>(&beacon_id), 1, sizeof(beacon_id), out_.file());
+                fwrite(reinterpret_cast<char*>(&cycle), 1, sizeof(cycle), out_.file());
+                // fwrite(reinterpret_cast<char*>(&start_idx), 1, sizeof(start_idx), out_.file());
+                // fwrite(reinterpret_cast<char*>(&stop_idx), 1, sizeof(stop_idx), out_.file());
 
                 // write data
-                fwrite(corrected_corr_fft_.data(), sizeof(complex<float>), corr_size_, out_.file());
+                fwrite(corrected_corr_fft_.data()+start_idx,
+                       sizeof(complex<float>),
+                       stop_idx-start_idx,
+                       out_.file());
             }
         }
 
