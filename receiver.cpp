@@ -37,8 +37,11 @@ using namespace std;
 // time in seconds to capture after the first beacon detection
 #define MAX_CAPTURE_TIME 60
 
-#define OUTPUT_WINDOW_START 100
-#define OUTPUT_WINDOW_STOP 213
+// #define OUTPUT_WINDOW_START 750
+// #define OUTPUT_WINDOW_LEN 200
+
+#define OUTPUT_WINDOW_START 0
+#define OUTPUT_WINDOW_LEN -1
 
 
 // Angles are stored as a value between -0.5 and 0.5 to simplify normalisation
@@ -74,21 +77,133 @@ void freq_shift(complex<float> *dest,
 }
 
 
-// Calculate the complex argument at 0 Hz from a time-domain signal
-DeciAngle calculate_dc_phase(complex<float> *signal, size_t len) {
+complex<float> calculate_dc(complex<float> *signal, size_t len) {
     std::complex<float> sum = std::accumulate(signal,
                                               signal + len,
                                               std::complex<float>(0, 0));
-
-    // calculate spectral density at DC
-    complex<float> dc = sum / (float)len;
-    return normalize_deciangle(arg(dc) / (float)PI / 2);
+    return sum;  // / (float)len;
+    // TODO: compare to fft(signal)
 }
+
+
+// // Calculate the complex argument at 0 Hz from a time-domain signal
+// DeciAngle calculate_dc_phase(complex<float> *signal, size_t len) {
+//     std::complex<float> sum = std::accumulate(signal,
+//                                               signal + len,
+//                                               std::complex<float>(0, 0));
+// 
+//     // calculate spectral density at DC
+//     complex<float> dc = sum / (float)len;
+//     return normalize_deciangle(arg(dc) / (float)PI / 2);
+// }
 
 
 inline complex<float>* to_complex_star(fcomplex* array) {
     return reinterpret_cast<complex<float>*>(array);
 }
+
+
+struct CorxFileHeader {
+    uint16_t slice_start_idx;
+    uint16_t slice_size;  // a.k.a. corr block length
+} __attribute__((packed));
+
+
+struct CorxBeaconHeader {
+    double soa;
+    uint64_t timestamp_sec;
+    uint16_t timestamp_msec;
+    uint32_t beacon_amplitude;
+    uint32_t beacon_noise;
+    float clock_error;
+    float carrier_pos;
+    uint32_t carrier_amplitude;
+} __attribute__((packed));
+
+
+// Assumptions:
+//  - structs are byte-aligned
+//  - ints are little endian
+//  - IEEE floating points
+// TODO: better portability (e.g. do not memcpy structs)
+class CorxFileWriter {
+public:
+    CorxFileWriter(CFile&& out)
+        : out_(std::move(out)), slice_size_(0) {};
+
+    void write_file_header(const CorxFileHeader &header) {
+        if (is_void()) {
+            return;
+        }
+
+        // output file signature
+        fprintf(out_.file(), "CORX");
+
+        // output file format version
+        fputc(version, out_.file());
+
+        // output file header
+        fwrite(reinterpret_cast<const char*>(&header),
+               sizeof(header),
+               1,
+               out_.file());
+
+        slice_size_ = header.slice_size;
+    }
+
+    void write_cycle_start(const CorxBeaconHeader &header) {
+        // sein sterkte: carrier, beacon
+        if (is_void()) {
+            return;
+        }
+
+        fwrite(reinterpret_cast<const char*>(&header),
+               sizeof(header),
+               1,
+               out_.file());
+    }
+
+    void write_cycle_block(int8_t phase_error,
+                           const complex<float> *data,
+                           uint16_t len) {
+        if (is_void()) {
+            return;
+        }
+
+        assert(len == slice_size_);
+        assert(phase_error != -128);
+        write_cycle_block_internal(phase_error, data, len);
+    }
+
+    void write_cycle_stop() {
+        if (is_void()) {
+            return;
+        }
+
+        // indicate end of cycle
+        write_cycle_block_internal(-128, NULL, 0);
+    }
+
+    bool is_void() {
+        return out_.file() == nullptr;
+    }
+
+private:
+    void write_cycle_block_internal(int8_t phase_error,
+                                    const complex<float> *data,
+                                    uint16_t len) {
+        fputc(phase_error, out_.file());
+
+        fwrite(data,
+               sizeof(complex<float>),
+               len,
+               out_.file());
+    }
+
+    CFile out_;
+    int slice_size_;
+    const static uint8_t version = 0x01;
+};
 
 
 class ArrayDetector {
@@ -106,7 +221,7 @@ public:
                   corr_size_(corr_size),
                   corr_fft_calc_(corr_size, true),
                   corrected_corr_fft_(corr_size),
-                  out_(std::move(out)) {
+                  writer_(std::move(out)) {
 
         carrier_det_.reset(new CarrierDetector(args_));
         vector<float> template_samples = load_template(template_file);
@@ -126,17 +241,31 @@ public:
         
         num_cycles_ = ((args_->sdr_sample_rate - 2*skip_beacon_padding_) / 
                        corr_size_);
+
+        slice_start_ = max(0, OUTPUT_WINDOW_START);
+        slice_len_ = (OUTPUT_WINDOW_LEN <= 0) ? corr_size_
+                     : min(corr_size_, (size_t)OUTPUT_WINDOW_LEN);
     }
 
     void start() {
         detected_carrier_ = false;
         carrier_det_->start();
+
+        writer_.write_file_header({(uint16_t)slice_start_,
+                                   (uint16_t)slice_len_});
     }
 
     bool next() {
+        if (last_block_ > 0 && block_idx_ == last_block_) {
+            carrier_det_->cancel();
+        }
+
         // read the next block without performing carrier detection
         bool success = carrier_det_->next();
         if (!success) {
+            if (cycle_ >= 0) {
+                writer_.write_cycle_stop();
+            }
             return false;
         }
 
@@ -164,8 +293,8 @@ public:
         if (cycle_ == -1) {
             // TODO: use change in signal strength to determine whether it is
             // worth looking for a beacon signal
-            bool detected = find_beacon();
-            if (detected) {
+            CorrDetection corr = find_beacon();
+            if (corr.detected) {
                 clock_error_ = estimate_clock_error();
 
                 printf("beacon #%d: ppm=%.3f\n",
@@ -186,18 +315,25 @@ public:
                            block_idx_, MAX_CAPTURE_TIME, last_block_);
                 }
 
-                beacon_timestamp_ = carrier_det_->data().block->timestamp;
+                // TODO: move code below to extract_corr_blocks?
+                const struct timeval ts = carrier_det_->data().block->timestamp;
+
+                CorxBeaconHeader header;
+                header.soa = soa_;
+                header.timestamp_sec = ts.tv_sec;
+                header.timestamp_msec = ts.tv_usec / 1000;
+                header.beacon_amplitude = sqrt(corr.peak_power);
+                header.beacon_noise = sqrt(corr.noise_power);  // FIXME
+                header.clock_error = clock_error_;
+                header.carrier_pos = carrier_pos_;
+                header.carrier_amplitude = dc_ampl_;
+                writer_.write_cycle_start(header);
             }
 
         }
         
         if (cycle_ >= 0) {
             extract_corr_blocks();  // pass parameters, e.g. clock_error_
-        }
-
-        if (last_block_ > 0 && block_idx_ == last_block_) {
-            carrier_det_->cancel();
-            return false;
         }
 
         return true;
@@ -223,7 +359,10 @@ protected:
                        sample_phase_);
 
             prev_dc_angle_ = dc_angle_;
-            dc_angle_ = calculate_dc_phase(synced_signal_, args_->block_len);
+
+            complex<float> dc = calculate_dc(synced_signal_, args_->block_len);
+            dc_ampl_ = abs(dc);
+            dc_angle_ = normalize_deciangle(arg(dc) / (float)PI / 2);
 
             float angle_diff = normalize_deciangle(dc_angle_ - prev_dc_angle_);
 
@@ -269,7 +408,9 @@ protected:
                            -carrier_pos_,
                            sample_phase_);
 
-                dc_angle_ = calculate_dc_phase(synced_signal_, args_->block_len);
+                complex<float> dc = calculate_dc(synced_signal_, args_->block_len);
+                dc_ampl_ = abs(dc);
+                dc_angle_ = normalize_deciangle(arg(dc) / (float)PI / 2);
 
             } else {
                 printf("block #%u: No carrier detected\n", block_idx_);
@@ -280,7 +421,7 @@ protected:
         return detected_carrier_;
     }
 
-    bool find_beacon() {
+    CorrDetection find_beacon() {
         synced_fft_calc_.execute();
         float signal_energy = 0; // TODO: calculate signal_energy
         CorrDetection corr = corr_det_->detect(synced_fft_, signal_energy);
@@ -308,10 +449,15 @@ protected:
                    soa_,
                    time_step);
         }
-        return corr.detected;
+
+        return corr;
     }
 
     void extract_corr_blocks() {
+        // if (cycle_ == 0) {
+        //     // write beacon header
+        // }
+
         for (; cycle_ < num_cycles_; ++cycle_) {
             // calculate index of first sample in correlation block
             float start = ((float)soa_
@@ -339,11 +485,12 @@ protected:
                        (start - start_idx),
                        -avg_dc_angle_);
 
-            float error = arg(corrected_corr_fft_.data()[0]);
-            if (abs(error) > 0.2 * 2 * PI) {
+            DeciAngle error = arg(corrected_corr_fft_.data()[0]) / 2 / PI;
+            if (abs(error) > 0.2) {
                 num_phase_errors_++;
-                // printf("Phase error > 0.2: %f\n", error / 2 / PI);
+                // printf("Phase error > 0.2: %f\n", error);
             }
+
 
             // printf("block #%d, beacon #%d, cycle #%d, start %lu: error %.1f deg\n",
             //        block_idx_,
@@ -353,36 +500,37 @@ protected:
             //        error / 2 / PI * 360);
 
             // Dump to output file
-            // FIXME: We assume little endianness
+            uint8_t error_fp = error / 0.5 * 127;
+            writer_.write_cycle_block(error_fp,
+                                      corrected_corr_fft_.data()+slice_start_,
+                                      slice_len_);
 
-            if (out_.file()) {
-                uint16_t ts_sec = beacon_timestamp_.tv_sec % 86400;
-                uint8_t ts_usec = beacon_timestamp_.tv_usec % 100;
-                uint16_t beacon_id = beacon_;
-                uint16_t cycle = cycle_;
+            // if (!writer_.is_void()) {
+            //     // uint16_t ts_sec = beacon_timestamp_.tv_sec % 86400;
+            //     // uint8_t ts_usec = beacon_timestamp_.tv_usec % 100;
+            //     uint16_t beacon_id = beacon_;
+            //     uint16_t cycle = cycle_;
 
-                uint16_t start_idx = max(0, OUTPUT_WINDOW_START);
-                uint16_t stop_idx = (OUTPUT_WINDOW_STOP <= 0) ? corr_size_
-                                    : min((uint16_t)corr_size_, (uint16_t)OUTPUT_WINDOW_STOP);
 
-                // write header
-                fwrite(reinterpret_cast<char*>(&ts_sec), 1, sizeof(ts_sec), out_.file());
-                fwrite(reinterpret_cast<char*>(&ts_usec), 1, sizeof(ts_usec), out_.file());
-                fwrite(reinterpret_cast<char*>(&beacon_id), 1, sizeof(beacon_id), out_.file());
-                fwrite(reinterpret_cast<char*>(&cycle), 1, sizeof(cycle), out_.file());
-                // fwrite(reinterpret_cast<char*>(&start_idx), 1, sizeof(start_idx), out_.file());
-                // fwrite(reinterpret_cast<char*>(&stop_idx), 1, sizeof(stop_idx), out_.file());
+            //     // write header
+            //     fwrite(reinterpret_cast<char*>(&ts_sec), 1, sizeof(ts_sec), out_.file());
+            //     fwrite(reinterpret_cast<char*>(&ts_usec), 1, sizeof(ts_usec), out_.file());
+            //     fwrite(reinterpret_cast<char*>(&beacon_id), 1, sizeof(beacon_id), out_.file());
+            //     fwrite(reinterpret_cast<char*>(&cycle), 1, sizeof(cycle), out_.file());
+            //     // fwrite(reinterpret_cast<char*>(&start_idx), 1, sizeof(start_idx), out_.file());
+            //     // fwrite(reinterpret_cast<char*>(&stop_idx), 1, sizeof(stop_idx), out_.file());
 
-                // write data
-                fwrite(corrected_corr_fft_.data()+start_idx,
-                       sizeof(complex<float>),
-                       stop_idx-start_idx,
-                       out_.file());
-            }
+            //     // write data
+            //     fwrite(corrected_corr_fft_.data()+slice_start,
+            //            sizeof(complex<float>),
+            //            slice_stop-slice_start,
+            //            out_.file());
+            // }
         }
 
         if (cycle_ >= num_cycles_) {
             cycle_ = -1;
+            writer_.write_cycle_stop();
             if (num_phase_errors_ > 0) {
                 printf("beacon %d: %d / %d corr blocks have large phase error\n",
                        beacon_, num_phase_errors_, num_cycles_);
@@ -427,6 +575,7 @@ private:
     // Complex argument at DC frequency
     DeciAngle dc_angle_ = 0;
     DeciAngle prev_dc_angle_;
+    float dc_ampl_;
 
     // The expected frequency offset in bins used as reference for estiamting
     // the clock error.
@@ -444,7 +593,7 @@ private:
     int32_t beacon_ = -1;
 
     // Timestamp of last beacon detection
-    struct timeval beacon_timestamp_;
+    // struct timeval beacon_timestamp_;
 
     // Beacon Sample of Arrival
     double soa_ = 0;
@@ -478,8 +627,12 @@ private:
     // Number of correlation blocks with large phase offsets.
     int num_phase_errors_;
 
+    // Output slice
+    int slice_start_;
+    int slice_len_;
+
     // Output stream.
-    CFile out_;
+    CorxFileWriter writer_;
 };
 
 
