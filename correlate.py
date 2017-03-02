@@ -40,6 +40,8 @@ def _main():
     errors1 = []
     errors2 = []
 
+    _, _ = reader1.next() #  FIXME: Temp
+
     while True:
         # advance all readers if synced
         # only advance the reader that are lagging behind if not synced
@@ -58,6 +60,8 @@ def _main():
 
         if timediff >= timediff_thresh:
             print('Timestamp mismatch:', timediff)
+
+        timediff = 0  # FIXME: Temp
 
         if abs(timediff) < timediff_thresh:
             for (error1, fft1), (error2, fft2) in itertools.izip(cycles1, cycles2):
