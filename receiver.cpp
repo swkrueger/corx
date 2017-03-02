@@ -18,9 +18,9 @@
 #include <argp.h>
 
 // fastcard and fastdet headers
-#include <corr_detector.h>
-#include <fastcard_wrappers.h>
-#include <parse.h>
+#include <fastdet/corr_detector.h>
+#include <fastdet/fastcard_wrappers.h>
+#include <fastcard/parse.h>
 
 #include "sine_lookup.h"
 

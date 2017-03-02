@@ -1,0 +1,1 @@
+/home/sw/Nagraads/Code/Thrifty/fastdet/cmake/Modules/FindFastcard.cmake
