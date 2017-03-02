@@ -460,9 +460,9 @@ protected:
 
         for (; cycle_ < num_cycles_; ++cycle_) {
             // calculate index of first sample in correlation block
-            float start = ((float)soa_
-                           + (skip_beacon_padding_ + cycle_ * corr_size_)
-                             * (1 + clock_error_)
+            double start = (soa_
+                            + (skip_beacon_padding_ + cycle_ * corr_size_)
+                             * (1 - clock_error_)
                            - block_idx_
                              * (args_->block_len - args_->history_len));
             size_t start_idx = int(round(start));
@@ -482,7 +482,7 @@ protected:
             freq_shift(corrected_corr_fft_.data(),
                        corr_fft_,
                        corr_size_,
-                       (start - start_idx),
+                       start - start_idx,
                        -avg_dc_angle_);
 
             DeciAngle error = arg(corrected_corr_fft_.data()[0]) / 2 / PI;
