@@ -77,6 +77,30 @@ void freq_shift(complex<float> *dest,
 }
 
 
+// Like freq_shift, but accounts for discontinuity at DC due to FFT
+// representation (i.e. zero-frequency at index 0).
+void fft_shift(complex<float> *dest,
+                const complex<float> *src,
+                size_t len,
+                float shift_freq,
+                DeciAngle shift_phase,
+                size_t carrier_offset) {
+    // freq_shift(dest, src, len, shift_freq, shift_phase);
+    // complex<float> phase_fix = SineLookup::expj(-2 * (float)PI * shift_freq);
+    // for (size_t i = (len+1)/2 + carrier_offset; i < len; ++i) {
+    //     dest[i] *= phase_fix;
+    // }
+
+    // Alternative:
+    SineLookupNCO nco(2 * (float)PI * shift_phase,
+                      2 * (float)PI * shift_freq / (float)len);
+    size_t pos_len = (len+1)/2 + carrier_offset;  // number of positive frequency components
+    nco.expj_multiply(dest, src, pos_len);
+    nco.adjust_phase(-2 * (float)PI * shift_freq);
+    nco.expj_multiply(dest+pos_len, src+pos_len, len-pos_len);
+}
+
+
 complex<float> calculate_dc(complex<float> *signal, size_t len) {
     std::complex<float> sum = std::accumulate(signal,
                                               signal + len,
@@ -479,11 +503,12 @@ protected:
             corr_fft_calc_.execute();
 
             // correct for complex phase offset and time offset
-            freq_shift(corrected_corr_fft_.data(),
-                       corr_fft_,
-                       corr_size_,
-                       start - start_idx,
-                       -avg_dc_angle_);
+            fft_shift(corrected_corr_fft_.data(),
+                      corr_fft_,
+                      corr_size_,
+                      start - start_idx,
+                      -avg_dc_angle_,
+                      -carrier_pos_ * corr_size_ / args_->block_len);
 
             DeciAngle error = arg(corrected_corr_fft_.data()[0]) / 2 / PI;
             if (abs(error) > 0.2) {

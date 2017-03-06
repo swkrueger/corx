@@ -96,6 +96,10 @@ public:
     void set_freq(float angle_rate) {
         phase_step_ = SineLookupFixedPoint::float_to_fixed(angle_rate);
     }
+
+    void adjust_phase(float delta_angle) {
+        phase_ += SineLookupFixedPoint::float_to_fixed(delta_angle);
+    }
     
     void step() {
         phase_ += phase_step_;
