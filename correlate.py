@@ -1,27 +1,18 @@
-"""Calculate correlation coefficients using two .corx files."""
+"""Calculate correlation coefficients from data in two .corx files."""
 
 from __future__ import print_function
 
 import itertools
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 
 from corx_reader import corx_reader
 
 
-def _main():
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('corx1', type=argparse.FileType('rb'),
-                        help=".corx file to correlate ('-' streams from stdin)")
-    parser.add_argument('corx2', type=argparse.FileType('rb'),
-                        help=".corx file to correlate ('-' streams from stdin)")
-    parser.add_argument('--period', type=float, default=1.0,
-                        help='Expected time delay between subsequent beacon pulses.')
-    args = parser.parse_args()
-
-    file_header1, reader1 = corx_reader(args.corx1)
-    file_header2, reader2 = corx_reader(args.corx2)
+def correlate(corx1, corx2, period):
+    file_header1, reader1 = corx_reader(corx1)
+    file_header2, reader2 = corx_reader(corx2)
 
     assert(file_header1.slice_start == file_header2.slice_start)
     assert(file_header1.slice_size == file_header2.slice_size)
@@ -35,12 +26,10 @@ def _main():
     cnt = 0
 
     timediff = 0
-    timediff_thresh = args.period / 4.
+    timediff_thresh = period / 4.
 
     errors1 = []
     errors2 = []
-
-    _, _ = reader1.next() #  FIXME: Temp
 
     while True:
         # advance all readers if synced
@@ -52,16 +41,16 @@ def _main():
                 header2, cycles2 = reader2.next()
         except StopIteration:
             break
-        print(header1, header2)
+        print(header1)
+        print(header2)
+        print()
 
         timestamp1 = header1.timestamp_sec + header1.timestamp_msec / 1000.
-        timestamp2 = header2.timestamp_sec + header2.timestamp_msec / 2000.
+        timestamp2 = header2.timestamp_sec + header2.timestamp_msec / 1000.
         timediff = timestamp1 - timestamp2
 
         if timediff >= timediff_thresh:
-            print('Timestamp mismatch:', timediff)
-
-        timediff = 0  # FIXME: Temp
+	    print('Skip pair due to timestamp mismatch of {:.3f} s'.format(timediff))
 
         if abs(timediff) < timediff_thresh:
             for (error1, fft1), (error2, fft2) in itertools.izip(cycles1, cycles2):
@@ -73,24 +62,89 @@ def _main():
                 errors1.append(error1)
                 errors2.append(error2)
 
+    if cnt == 0:
+        print("No beacon matches :(")
+        return None
+
     xcorr = xcorr_sum / cnt
     autocorr1 = autocorr1_sum / cnt
     autocorr2 = autocorr2_sum / cnt
 
-    # corr
-    xcorr_coeffs = xcorr / np.sqrt(np.abs(autocorr1) * np.abs(autocorr2))
+    return xcorr, autocorr1, autocorr2, cnt, errors1, errors2
 
-    plt.semilogy(np.fft.fftshift(autocorr1.real))
-    plt.semilogy(np.fft.fftshift(autocorr2.real))
+
+def plot_coeffs(xcorr_coeffs):
     plt.figure()
     plt.plot(np.fft.fftshift(xcorr_coeffs.real), label='Real')
     plt.plot(np.fft.fftshift(xcorr_coeffs.imag), label='Imag')
     plt.plot(np.fft.fftshift(np.abs(xcorr_coeffs)), label='Mag')
+    plt.title('Cross-correlation coefficients')
     plt.legend()
+
+
+def plot_autocorr(autocorr1, autocorr2):
     plt.figure()
-    plt.plot(errors1)
-    plt.plot(errors2)
-    plt.show()
+    plt.semilogy(np.fft.fftshift(autocorr1.real), label='corx1')
+    plt.semilogy(np.fft.fftshift(autocorr2.real), label='corx2')
+    plt.title('Autocorrelation (real)')
+    plt.legend()
+
+
+def _main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('corx1', type=argparse.FileType('rb'), nargs='?',
+                        help=".corx file to correlate ('-' streams from stdin)")
+    parser.add_argument('corx2', type=argparse.FileType('rb'), nargs='?',
+                        help=".corx file to correlate ('-' streams from stdin)")
+    parser.add_argument('-o', '--output', type=argparse.FileType('wb'),
+                        help=".npz output file")
+    parser.add_argument('-p', '--plot', const=True, action='store', nargs='?',
+                        default=None, type=argparse.FileType('rb'),
+                        help="Plot autocorr and xcorr coefficients")
+    parser.add_argument('--period', type=float, default=1.0,
+                        help='Expected time delay between subsequent beacon pulses.')
+    args = parser.parse_args()
+
+    if args.plot and args.plot is not True:
+        print('Plot xcorr from file...')
+        npzfile = np.load(args.plot)
+        print("Xcorr was calculated from {} blocks.".format(npzfile['cnt']))
+        plot_coeffs(npzfile['coeffs'])
+        plot_autocorr(npzfile['autocorr1'], npzfile['autocorr2'])
+        plt.show()
+        sys.exit(0)
+
+    elif not args.corx1 or not args.corx2:
+        print("too few arguments: no .corx files specified.", file=sys.stderr)
+        sys.exit(2)
+
+    ret = correlate(args.corx1, args.corx2, args.period)
+    if ret is not None:
+        xcorr, autocorr1, autocorr2, cnt, errors1, errors2 = ret
+        xcorr_coeffs = xcorr / np.sqrt(np.abs(autocorr1) * np.abs(autocorr2))
+
+        print("Calculated xcorr from {} blocks.".format(cnt))
+
+        # save
+        if args.output:
+            np.savez(args.output,
+                     coeffs=xcorr_coeffs,
+                     autocorr1=autocorr1,
+                     autocorr2=autocorr2,
+                     cnt=cnt)
+
+        # plot
+        if args.plot:
+            plot_coeffs(xcorr_coeffs)
+            plot_autocorr(autocorr1, autocorr2)
+
+            plt.figure()
+            plt.plot(errors1, label='corx1')
+            plt.plot(errors2, label='corx2')
+            plt.title('Phase errors')
+
+            plt.show()
 
 
 if __name__ == '__main__':

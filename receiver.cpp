@@ -35,7 +35,7 @@ using namespace std;
 #define BEACON_INTERVAL_SEC 1
 
 // time in seconds to capture after the first beacon detection
-#define MAX_CAPTURE_TIME 60
+#define MAX_CAPTURE_TIME 10
 
 // #define OUTPUT_WINDOW_START 750
 // #define OUTPUT_WINDOW_LEN 200
@@ -525,7 +525,7 @@ protected:
             //        error / 2 / PI * 360);
 
             // Dump to output file
-            uint8_t error_fp = error / 0.5 * 127;
+            int8_t error_fp = error / 0.5 * 127;
             writer_.write_cycle_block(error_fp,
                                       corrected_corr_fft_.data()+slice_start_,
                                       slice_len_);
