@@ -8,12 +8,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 FILE_HEADER_FMT = '<HH'
-BEACON_HEADER_FMT = '<dQHIIffI'
+BEACON_HEADER_FMT = '<dQHIIffI?'
 
 FileHeader = namedtuple('FileHeader', 'slice_start, slice_size')
 BeaconHeader = namedtuple('BeaconHeader', 'soa, timestamp_sec, timestamp_msec,'
                           'beacon_amplitude, beacon_noise, clock_error,'
-                          'carrier_pos, carrier_amplitude')
+                          'carrier_pos, carrier_amplitude, preamp_on')
 Block = namedtuple('Block', 'phase_error, data')
 
 

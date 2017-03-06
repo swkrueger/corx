@@ -1,5 +1,8 @@
 // A quick-n-dirty proof-of-concept fast C++ implementation.
 
+// requires librtlsdr from https://github.com/rtlsdrblog/rtl-sdr
+#define LIBRTLSDR_BIAS_TEE_SUPPORT
+
 #include <algorithm>
 #include <complex>
 #include <iostream>
@@ -21,6 +24,7 @@
 #include <fastdet/corr_detector.h>
 #include <fastdet/fastcard_wrappers.h>
 #include <fastcard/parse.h>
+#include <fastcard/rtlsdr_reader.h>
 
 #include "sine_lookup.h"
 
@@ -29,13 +33,21 @@ using namespace std;
 #define _USE_MATH_DEFINES
 #define PI M_PI
 
-#define MAX_TRACKING_ANGLE_DIFF 45
+#define MAX_TRACKING_ANGLE_DIFF 50
 #define TRACKING_ANGLE_DIFF_FACTOR 0.2
 #define AVG_ANGLE_WEIGHT 0.1
 #define BEACON_INTERVAL_SEC 1
 
 // time in seconds to capture after the first beacon detection
-#define MAX_CAPTURE_TIME 10
+#define MAX_CAPTURE_TIME 12
+
+// number of seconds for which the preamp should be switched off.
+// The last PREAMP_OFF_TIME seconds of the capture time will be spent with the
+// preamp off.
+#define PREAMP_OFF_TIME 2
+
+// amount of data to skip (in seconds) after the preamp is switced off.
+#define PREAMP_OFF_SKIP 0.5
 
 // #define OUTPUT_WINDOW_START 750
 // #define OUTPUT_WINDOW_LEN 200
@@ -142,6 +154,7 @@ struct CorxBeaconHeader {
     float clock_error;
     float carrier_pos;
     uint32_t carrier_amplitude;
+    bool preamp_on;
 } __attribute__((packed));
 
 
@@ -269,17 +282,50 @@ public:
         slice_start_ = max(0, OUTPUT_WINDOW_START);
         slice_len_ = (OUTPUT_WINDOW_LEN <= 0) ? corr_size_
                      : min(corr_size_, (size_t)OUTPUT_WINDOW_LEN);
+
+    }
+
+    bool set_bias_tee(bool on) {
+//#ifdef HAS_RTLSDR_BIAS
+        if (strcmp(args_->input_file, "rtlsdr") != 0) {
+            return false;
+        }
+
+#ifdef LIBRTLSDR_BIAS_TEE_SUPPORT
+        rtlsdr_reader_set_bias_tee(carrier_det_->get()->reader, on);
+        printf(on ? "Enabled bias tee\n" : "Disabled bias tee\n");
+        return true;
+#else
+        return false;
+#endif
     }
 
     void start() {
         detected_carrier_ = false;
         carrier_det_->start();
 
+        set_bias_tee(true);
+
         writer_.write_file_header({(uint16_t)slice_start_,
                                    (uint16_t)slice_len_});
     }
 
     bool next() {
+        if (preamp_off_block_ > 0 && block_idx_ == preamp_off_block_) {
+            printf("block #%d: Switching off preamp...\n", block_idx_);
+
+            if (cycle_ >= 0) {
+                cycle_ = -1;
+                writer_.write_cycle_stop();
+            }
+
+            set_bias_tee(false);
+
+            blocks_skip_ = (PREAMP_OFF_SKIP * args_->sdr_sample_rate /
+                            (args_->block_len - args_->history_len));
+            printf("Skipping %d blocks...\n", blocks_skip_);
+        }
+
         if (last_block_ > 0 && block_idx_ == last_block_) {
             carrier_det_->cancel();
         }
@@ -295,17 +341,8 @@ public:
 
         block_idx_++;
 
-        if (blocks_skip_) {
-            --blocks_skip_;
-            return true;
-        }
-
         // calculate detected_carrier_, synced_signal_ and dc_angle_.
         recover_carrier();
-
-        if (!detected_carrier_) {
-            return true;
-        }
 
         sample_phase_ -= carrier_pos_ * (1.f - (float)args_->history_len /
                                                       args_->block_len);
@@ -313,6 +350,15 @@ public:
 
         avg_dc_angle_ = (dc_angle_ * AVG_ANGLE_WEIGHT +
                          avg_dc_angle_ * (1-AVG_ANGLE_WEIGHT));
+
+        if (!detected_carrier_) {
+            return true;
+        }
+
+        if (blocks_skip_) {
+            --blocks_skip_;
+            return true;
+        }
 
         if (cycle_ == -1) {
             // TODO: use change in signal strength to determine whether it is
@@ -337,6 +383,11 @@ public:
                            "We'll stop after %d seconds "
                            "(at block block #%u).\n",
                            block_idx_, MAX_CAPTURE_TIME, last_block_);
+
+                    preamp_off_block_ = (((MAX_CAPTURE_TIME - PREAMP_OFF_TIME)
+                                          * args_->sdr_sample_rate)
+                                          / (args_->block_len - args_->history_len)
+                                         + block_idx_);
                 }
 
                 // TODO: move code below to extract_corr_blocks?
@@ -351,6 +402,7 @@ public:
                 header.clock_error = clock_error_;
                 header.carrier_pos = carrier_pos_;
                 header.carrier_amplitude = dc_ampl_;
+                header.preamp_on = (block_idx_ < preamp_off_block_);
                 writer_.write_cycle_start(header);
             }
 
@@ -529,28 +581,6 @@ protected:
             writer_.write_cycle_block(error_fp,
                                       corrected_corr_fft_.data()+slice_start_,
                                       slice_len_);
-
-            // if (!writer_.is_void()) {
-            //     // uint16_t ts_sec = beacon_timestamp_.tv_sec % 86400;
-            //     // uint8_t ts_usec = beacon_timestamp_.tv_usec % 100;
-            //     uint16_t beacon_id = beacon_;
-            //     uint16_t cycle = cycle_;
-
-
-            //     // write header
-            //     fwrite(reinterpret_cast<char*>(&ts_sec), 1, sizeof(ts_sec), out_.file());
-            //     fwrite(reinterpret_cast<char*>(&ts_usec), 1, sizeof(ts_usec), out_.file());
-            //     fwrite(reinterpret_cast<char*>(&beacon_id), 1, sizeof(beacon_id), out_.file());
-            //     fwrite(reinterpret_cast<char*>(&cycle), 1, sizeof(cycle), out_.file());
-            //     // fwrite(reinterpret_cast<char*>(&start_idx), 1, sizeof(start_idx), out_.file());
-            //     // fwrite(reinterpret_cast<char*>(&stop_idx), 1, sizeof(stop_idx), out_.file());
-
-            //     // write data
-            //     fwrite(corrected_corr_fft_.data()+slice_start,
-            //            sizeof(complex<float>),
-            //            slice_stop-slice_start,
-            //            out_.file());
-            // }
         }
 
         if (cycle_ >= num_cycles_) {
@@ -588,6 +618,9 @@ private:
 
     // Stop at the given block index (if > 0).
     unsigned last_block_ = 0;
+
+    // Block index at which preamp should be switched off
+    unsigned preamp_off_block_ = 0;
 
     // Phase of first sample in block.
     // Used to ensure a continuous phase between subsequent blocks.
