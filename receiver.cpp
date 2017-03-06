@@ -460,7 +460,7 @@ protected:
                      block_idx_ + corr.peak_idx) + corr.peak_offset;
             float time_step = (soa_ - prev_soa_) / args_->sdr_sample_rate;
 
-            if (time_step > 1.5 * BEACON_INTERVAL_SEC) {
+            if ((beacon_ > 0) && (time_step > 1.5 * BEACON_INTERVAL_SEC)) {
                 // We missed a pulse. Estimate beacon index from sample index.
                 printf("Large time step!\n");
                 beacon_ += (int)round(time_step);
