@@ -122,9 +122,9 @@ def plot_autocorr(autocorr1, autocorr2, autocorr1_off, autocorr2_off):
     plt.figure()
     plt.semilogy(np.fft.fftshift(autocorr1.real), label='corx1')
     plt.semilogy(np.fft.fftshift(autocorr2.real), label='corx2')
-    if autocorr1_off:
+    if autocorr1_off is not None:
         plt.semilogy(np.fft.fftshift(autocorr1_off.real), label='corx1 (off)')
-    if autocorr2_off:
+    if autocorr2_off is not None:
         plt.semilogy(np.fft.fftshift(autocorr2_off.real), label='corx2 (off)')
     plt.title('Autocorrelation (real)')
     plt.legend()

@@ -39,15 +39,14 @@ using namespace std;
 #define BEACON_INTERVAL_SEC 1
 
 // time in seconds to capture after the first beacon detection
-#define MAX_CAPTURE_TIME 12
+#define MAX_CAPTURE_TIME 10.1
 
-// number of seconds for which the preamp should be switched off.
-// The last PREAMP_OFF_TIME seconds of the capture time will be spent with the
-// preamp off.
-#define PREAMP_OFF_TIME 2
+// number of seconds after MAX_CAPTURE_TIME to capture data with the preamp
+// switched off.
+#define PREAMP_OFF_TIME 2.0
 
 // amount of data to skip (in seconds) after the preamp is switced off.
-#define PREAMP_OFF_SKIP 0.5
+#define PREAMP_OFF_SKIP 0.2
 
 // #define OUTPUT_WINDOW_START 750
 // #define OUTPUT_WINDOW_LEN 200
@@ -336,10 +335,53 @@ public:
             if (cycle_ >= 0) {
                 writer_.write_cycle_stop();
             }
+            carrier_det_->print_stats(stdout);
             return false;
         }
 
         block_idx_++;
+
+        if (blocks_skip_) {
+            --blocks_skip_;
+            return true;
+        }
+
+        if (preamp_off_block_ > 0 && block_idx_ > preamp_off_block_) {
+            // continue with last carrier frequency from when the preamp was on
+            freq_shift(synced_signal_,
+                       to_complex_star(carrier_det_->data().samples),
+                       args_->block_len,
+                       -carrier_pos_,
+                       sample_phase_);
+
+            if (cycle_ == -1) {
+                // FIXME: copy-pasta
+                printf("block #%d: Capture noise: next cycle\n", block_idx_);
+
+                soa_ = ((args_->block_len - args_->history_len) *
+                        block_idx_);  // FIXME: no padding
+
+                cycle_ = 0;
+                num_phase_errors_ = 0;
+
+                const struct timeval ts = carrier_det_->data().block->timestamp;
+                CorxBeaconHeader header;
+                header.soa = soa_;
+                header.timestamp_sec = ts.tv_sec;
+                header.timestamp_msec = ts.tv_usec / 1000;
+                header.beacon_amplitude = 0;
+                header.beacon_noise = 0;
+                header.clock_error = clock_error_;  // N/A
+                header.carrier_pos = carrier_pos_;
+                header.carrier_amplitude = 0;
+                header.preamp_on = false;
+                writer_.write_cycle_start(header);
+            }
+
+            extract_corr_blocks();
+
+            return true;
+        }
 
         // calculate detected_carrier_, synced_signal_ and dc_angle_.
         recover_carrier();
@@ -352,11 +394,6 @@ public:
                          avg_dc_angle_ * (1-AVG_ANGLE_WEIGHT));
 
         if (!detected_carrier_) {
-            return true;
-        }
-
-        if (blocks_skip_) {
-            --blocks_skip_;
             return true;
         }
 
@@ -376,15 +413,18 @@ public:
                 num_phase_errors_ = 0;
 
                 if (beacon_ == 0) {
-                    last_block_ = ((MAX_CAPTURE_TIME * args_->sdr_sample_rate) /
+                    last_block_ = (((MAX_CAPTURE_TIME + PREAMP_OFF_TIME) *
+                                    args_->sdr_sample_rate) /
                                    (args_->block_len - args_->history_len)
                                    + block_idx_);
                     printf("block %u: Found first beacon.\n"
-                           "We'll stop after %d seconds "
+                           "We'll stop after %.1f seconds "
                            "(at block block #%u).\n",
-                           block_idx_, MAX_CAPTURE_TIME, last_block_);
+                           block_idx_,
+                           (double)MAX_CAPTURE_TIME + PREAMP_OFF_TIME,
+                           last_block_);
 
-                    preamp_off_block_ = (((MAX_CAPTURE_TIME - PREAMP_OFF_TIME)
+                    preamp_off_block_ = ((MAX_CAPTURE_TIME
                                           * args_->sdr_sample_rate)
                                           / (args_->block_len - args_->history_len)
                                          + block_idx_);
@@ -402,7 +442,7 @@ public:
                 header.clock_error = clock_error_;
                 header.carrier_pos = carrier_pos_;
                 header.carrier_amplitude = dc_ampl_;
-                header.preamp_on = (block_idx_ < preamp_off_block_);
+                header.preamp_on = true;
                 writer_.write_cycle_start(header);
             }
 
