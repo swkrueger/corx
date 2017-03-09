@@ -54,6 +54,9 @@ using namespace std;
 #define OUTPUT_WINDOW_START 0
 #define OUTPUT_WINDOW_LEN -1
 
+#define BEACON_CARRIER_TRIGGER_FACTOR 0.8
+#define AVG_DCAMPL_WEIGHT 0.1
+
 
 // Angles are stored as a value between -0.5 and 0.5 to simplify normalisation
 // TODO: convert to class
@@ -392,14 +395,19 @@ public:
 
         avg_dc_angle_ = (dc_angle_ * AVG_ANGLE_WEIGHT +
                          avg_dc_angle_ * (1-AVG_ANGLE_WEIGHT));
+        avg_dc_ampl_ = (dc_ampl_ * AVG_DCAMPL_WEIGHT +
+                         avg_dc_ampl_ * (1-AVG_DCAMPL_WEIGHT));
 
         if (!detected_carrier_) {
             return true;
         }
 
-        if (cycle_ == -1) {
+        if (cycle_ == -1 && dc_ampl_ < avg_dc_ampl_ * BEACON_CARRIER_TRIGGER_FACTOR) {
+            printf("DC: %.1f; avg: %.1f\n", dc_ampl_, avg_dc_ampl_);
+
             // TODO: use change in signal strength to determine whether it is
             // worth looking for a beacon signal
+
             CorrDetection corr = find_beacon();
             if (corr.detected) {
                 clock_error_ = estimate_clock_error();
@@ -489,6 +497,7 @@ protected:
             if (angle_diff * 360 > MAX_TRACKING_ANGLE_DIFF) {
                 // tracking loop failed
                 detected_carrier_ = false;
+                printf("block #%u: Tracking loop failed\n", block_idx_);
             } else {
                 // track
                 carrier_pos_ += angle_diff * TRACKING_ANGLE_DIFF_FACTOR;
@@ -512,8 +521,11 @@ protected:
                     carrier_pos_ -= args_->block_len;
                 }
                 
-                printf("block #%u: Carrier @ %.3f\n", block_idx_, carrier_pos_);
-                // TODO: output SNR
+                printf("block #%u: Detected carrier @ %.3f; SNR: %.1f / %.1f\n",
+                       block_idx_,
+                       carrier_pos_,
+                       carrier.detection.max,
+                       carrier.detection.noise);
 
                 detected_carrier_ = true;
 
@@ -530,7 +542,6 @@ protected:
 
             } else {
                 printf("block #%u: No carrier detected\n", block_idx_);
-                return true;
             }
         }
 
@@ -682,8 +693,11 @@ private:
     // Estimated clock error.
     float clock_error_;
 
-    // Moving average of dc_angle_.
+    // Running average of dc_angle_.
     float avg_dc_angle_ = 0;
+
+    // Running average of dc_ampl_.
+    float avg_dc_ampl_ = 0;
 
     // Number of beacon pulses received.
     // Beacon pulses are used to relate samples of different receivers to each other.
