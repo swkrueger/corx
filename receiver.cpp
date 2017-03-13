@@ -111,6 +111,9 @@ DEFINE_double(beacon_carrier_trigger_factor, 0.8,
 DEFINE_double(timeout, -1,
               "Timeout, in seconds, after which the program will stop "
               "regardless of the detection state (-1 to disable timeout)");
+DEFINE_double(carrier_search_timeout, 5,
+              "Maximum time, in seconds, to search for a carrier before "
+              "giving up");
 DEFINE_double(capture_time, 10.1,
               "time in seconds to capture correlation data after the first "
               "beacon detection");
@@ -417,9 +420,15 @@ public:
         if (last_block_ > 0 && block_idx_ == last_block_) {
             carrier_det_->cancel();
         }
+        if (carrier_timeout_block_ > 0
+                && block_idx_ == carrier_timeout_block_) {
+            printf("Timeout: could not find carrier\n");
+            carrier_det_->cancel();
+        }
         if (FLAGS_timeout >= 0 &&
                 block_idx_ >= FLAGS_timeout * args_->sdr_sample_rate
                                             / nonhistory_size_) {
+            printf("Timeout: maximum time exceeded\n");
             carrier_det_->cancel();
         }
 
@@ -662,6 +671,15 @@ protected:
             } else {
                 printf("block #%u: No carrier detected\n", block_idx_);
             }
+
+            if (!detected_carrier_ && carrier_timeout_block_ == 0) {
+                carrier_timeout_block_ = (block_idx_ +
+                                          FLAGS_carrier_search_timeout
+                                          * nonhistory_size_);
+            }
+            if (detected_carrier_ && carrier_timeout_block_ > 0) {
+                carrier_timeout_block_ = 0;
+            }
         }
 
         return detected_carrier_;
@@ -794,6 +812,9 @@ private:
 
     // Block index at which preamp should be switched off
     unsigned preamp_off_block_ = 0;
+
+    // Carrier timeout block
+    unsigned carrier_timeout_block_ = 0;
 
     // Phase of first sample in block.
     // Used to ensure a continuous phase between subsequent blocks.
