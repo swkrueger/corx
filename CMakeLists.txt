@@ -28,9 +28,10 @@ endif()
 # find dependencies
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake/Modules)
 find_package(PkgConfig)
-find_package(Fastdet)
-find_package(Fastcard)
-find_package(Volk)
+find_package(Fastdet REQUIRED)
+find_package(Fastcard REQUIRED)
+find_package(Volk REQUIRED)
+find_package(GFlags REQUIRED)
 
 if(NOT FASTDET_FOUND)
     message(FATAL_ERROR "Fastdet required to compile corx")
@@ -47,6 +48,7 @@ target_link_libraries (corx_rx
                        ${FASTDET_LIBRARIES}
                        ${FASTCARD_LIBRARIES}
                        ${VOLK_LIBRARIES}
+                       ${GFLAGS_LIBRARIES}
                        m)
 
 # add install targets

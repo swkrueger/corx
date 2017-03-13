@@ -18,7 +18,8 @@
 #include <stdio.h>
 #include <stdio.h>
 
-#include <argp.h>
+#include <gflags/gflags.h>
+
 
 // fastcard and fastdet headers
 #include <fastdet/corr_detector.h>
@@ -31,6 +32,51 @@
 using namespace std;
 
 #define PI 3.14159265358979323846
+
+
+//// Fastcard settings
+// Input
+DEFINE_string(input, "rtlsdr",
+              "Input file with samples "
+              "('-' for stdin, 'rtlsdr' for librtlsdr)");
+DEFINE_string(wisdom, "",
+              "Wisfom file to use for FFT calculation"
+              "\n[default: don't use wisdom file]");
+
+// Block settings
+DEFINE_uint64(block_size, 16384,
+              "Length of fixed-sized blocks, which should be a power of two");
+DEFINE_uint64(history_size, 4920,
+              "The number of samples at the beginning of a block that should "
+              "be copied from the end of the previous block [default: 4920]");
+DEFINE_uint64(skip, 1,
+              "Number of blocks to skip while waiting for the SDR to "
+              "stabilize");
+
+// Tuner settings
+DEFINE_string(frequency, "1.42G",
+              "Frequency to tune to [default: 433.83M]");
+DEFINE_string(sample_rate, "2.4M", "Sample rate");
+DEFINE_uint64(gain, 0, "Tuner gain");
+DEFINE_uint64(device_index, 0, "RTL-SDR device index");
+
+// Carrier detection
+DEFINE_string(carrier_window, "0--1",
+              "Window of frequency bins used for carrier detection");
+DEFINE_string(carrier_threshold, "100c2s",
+              "Carrier detection theshold");
+
+//// Fastdet settings
+// Beacon detection
+DEFINE_string(beacon_threshold, "15s",
+              "Beacon correlation detection theshold");
+DEFINE_string(template, "template.tpl",
+              "Template to correlate with for beacon detection");
+
+//// Corx settings
+DEFINE_string(output, "",
+              ".corx file to write output to");
+
 
 #define MAX_TRACKING_ANGLE_DIFF 50
 #define TRACKING_ANGLE_DIFF_FACTOR 0.2
@@ -764,62 +810,36 @@ private:
 };
 
 
-
-
-//// CLI stuff
-// TODO: use proper command-line parser (e.g. tclap)
-
-const char *argp_program_version = "array_detector 0.1";
-static const char doc[] = "TODO";
-
-#define NUM_EXTRA_OPTIONS 5
-static struct argp_option extra_options[] = {
-    {"output", 'o', "<FILE>", 0,
-        "Output card file\n('-' for stdout)\n[default: no output]", 1},
-
-    // Correlator
-    {0, 0, 0, 0, "Correlator settings:", 5},
-    {"corr-threshold", 'u', "<constant>c<snr>s", 0,
-        "Correlation detection theshold\n[default: 15s]", 5},
-    {"template", 'z', "<FILE>", 0,
-        "Load template from a .tpl file\n[default: template.tpl]", 5},
-    {"rxid", 'r', "<int>", 0,
-        "This receiver's unique identifier\n[default: -1]", 5}
-};
-
-unique_ptr<fargs_t, decltype(free)*> args = {NULL, free};
-std::string output_file;
-std::string arg_template_file = "template.tpl";
-float arg_corr_thresh_const = 0;
-float arg_corr_thresh_snr = 15;
-int rxid = -1;
-
-static error_t parse_opt (int key, char *arg, struct argp_state *state) {
-    if (key == 'o') {
-        output_file = arg;
-    } else if (key == 'u') {
-        if (!parse_theshold_str(arg,
-                                &arg_corr_thresh_const,
-                                &arg_corr_thresh_snr)) {
-            argp_usage(state);
-        }
-    } else if (key == 'z') {
-        arg_template_file = arg;
-    } else if (key == 'r') {
-        rxid = atoi(arg);
-    } else if (key == ARGP_KEY_ARG) {
-        // We don't take any arguments
-        argp_usage(state);
-    } else {
-        int result = fargs_parse_opt(args.get(), key, arg);
-        if (result == FARGS_UNKNOWN) {
-            return ARGP_ERR_UNKNOWN;
-        } else if (result == FARGS_INVALID_VALUE) {
-            argp_usage(state);
-        }
+static void parse_fargs(fargs_t* fargs) {
+    fargs->input_file = FLAGS_input.c_str();
+    fargs->wisdom_file = FLAGS_wisdom.c_str();
+    if (!parse_carrier_str(FLAGS_carrier_window.c_str(),
+                           &fargs->carrier_freq_min,
+                           &fargs->carrier_freq_max)) {
+        fprintf(stderr,
+                "Invalid value for --carrier_window: %s\n",
+                FLAGS_carrier_window.c_str());
+        exit(1);
     }
+    if (!parse_theshold_str(FLAGS_carrier_threshold.c_str(),
+                            &fargs->threshold_const,
+                            &fargs->threshold_snr)) {
+        fprintf(stderr,
+                "Invalid value for --carrier_threshold: %s\n",
+                FLAGS_carrier_window.c_str());
+        exit(1);
+    }
+    fargs->block_len = FLAGS_block_size;
+    fargs->history_len = FLAGS_history_size;
+    fargs->skip = FLAGS_skip;
 
-    return 0;
+    // if (FLAGS_frequency.size() == 0 || FLAGS_sample_rate.size() == 0) {
+    //     exit(1);
+    // }
+    fargs->sdr_freq = (uint32_t)parse_si_float(&FLAGS_frequency[0]);
+    fargs->sdr_gain = (int)FLAGS_gain * 10; // unit: tenths of a dB
+    fargs->sdr_sample_rate = (uint32_t)parse_si_float(&FLAGS_sample_rate[0]);
+    fargs->sdr_dev_index = FLAGS_device_index;
 }
 
 std::unique_ptr<ArrayDetector> detector;
@@ -832,26 +852,30 @@ void signal_handler(int signo) {
 }
 
 int main(int argc, char **argv) {
-    // Argument parsing mess
-    struct argp_option options[FARGS_NUM_OPTIONS + NUM_EXTRA_OPTIONS];
-    memcpy(options,
-           extra_options,
-           sizeof(struct argp_option)*NUM_EXTRA_OPTIONS);
-    memcpy(options + NUM_EXTRA_OPTIONS,
-           fargs_options,
-           sizeof(struct argp_option)*FARGS_NUM_OPTIONS);
-    struct argp argp = {options, parse_opt, NULL,
-                        doc, NULL, NULL, NULL};
-
+    gflags::ParseCommandLineFlags(&argc, &argv, true);
+    unique_ptr<fargs_t, decltype(free)*> args = {NULL, free};
     args.reset(fargs_new());
-    argp_parse(&argp, argc, argv, 0, 0, 0);
+    parse_fargs(args.get());
+
+    float arg_corr_thresh_const, arg_corr_thresh_snr ;
+    if (!parse_theshold_str(FLAGS_beacon_threshold.c_str(),
+                            &arg_corr_thresh_const,
+                            &arg_corr_thresh_snr)) {
+        fprintf(stderr, "Invalid value for --beacon_threshold: %s\n",
+                FLAGS_carrier_window.c_str());
+        exit(1);
+    }
+    if (argc > 1) {
+        fprintf(stderr, "We do not take positional arguments\n");
+        exit(1);
+    }
 
     detector.reset(new ArrayDetector(args.get(),
-                                     arg_template_file,
+                                     FLAGS_template,
                                      arg_corr_thresh_const,
                                      arg_corr_thresh_snr,
                                      1024,
-                                     CFile(output_file)));
+                                     CFile(FLAGS_output)));
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
