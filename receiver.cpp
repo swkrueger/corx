@@ -108,6 +108,9 @@ DEFINE_double(beacon_carrier_trigger_factor, 0.8,
               "magnitude is less than the average carrier magnitude times "
               "this factor.");
 
+DEFINE_double(timeout, -1,
+              "Timeout, in seconds, after which the program will stop "
+              "regardless of the detection state (-1 to disable timeout)");
 DEFINE_double(capture_time, 10.1,
               "time in seconds to capture correlation data after the first "
               "beacon detection");
@@ -348,6 +351,9 @@ public:
                   int slice_len,
                   CFile&& out)
                 : args_(args),
+                  block_size_(args->block_len),
+                  history_size_(args->history_len),
+                  nonhistory_size_(args->block_len - args->history_len),
                   synced_fft_calc_(args->block_len, true),
                   corr_size_(corr_size),
                   corr_fft_calc_(corr_size, true),
@@ -357,8 +363,8 @@ public:
         carrier_det_.reset(new CarrierDetector(args_));
         vector<float> template_samples = load_template(template_file);
         corr_det_.reset(new CorrDetector(template_samples,
-                                         args_->block_len,
-                                         args_->history_len,
+                                         block_size_,
+                                         history_size_,
                                          corr_thresh_const,
                                          corr_thresh_snr));
 
@@ -411,6 +417,11 @@ public:
         if (last_block_ > 0 && block_idx_ == last_block_) {
             carrier_det_->cancel();
         }
+        if (FLAGS_timeout >= 0 &&
+                block_idx_ >= FLAGS_timeout * args_->sdr_sample_rate
+                                            / nonhistory_size_) {
+            carrier_det_->cancel();
+        }
 
         // read the next block without performing carrier detection
         bool success = carrier_det_->next();
@@ -460,8 +471,7 @@ protected:
             set_bias_tee(false);
 
             blocks_skip_ = (FLAGS_preamp_off_transition_time
-                            * args_->sdr_sample_rate
-                            / (args_->block_len - args_->history_len));
+                            * args_->sdr_sample_rate / nonhistory_size_);
             printf("Skipping %d blocks...\n", blocks_skip_);
         }
 
@@ -469,7 +479,7 @@ protected:
             // continue with last carrier frequency from when the preamp was on
             freq_shift(synced_signal_,
                        to_complex_star(carrier_det_->data().samples),
-                       args_->block_len,
+                       block_size_,
                        -carrier_pos_,
                        sample_phase_);
 
@@ -477,8 +487,7 @@ protected:
                 // FIXME: copy-pasta
                 printf("block #%d: Capture noise: next cycle\n", block_idx_);
 
-                soa_ = ((args_->block_len - args_->history_len) *
-                        block_idx_);  // FIXME: no padding
+                soa_ = (nonhistory_size_ * block_idx_);  // FIXME: no padding
 
                 cycle_ = 0;
                 num_phase_errors_ = 0;
@@ -505,8 +514,8 @@ protected:
         // calculate detected_carrier_, synced_signal_ and dc_angle_.
         recover_carrier();
 
-        sample_phase_ -= carrier_pos_ * (1.f - (float)args_->history_len /
-                                                      args_->block_len);
+        sample_phase_ -= (carrier_pos_ *
+                          (1.f - (float)history_size_ / block_size_));
         sample_phase_ = normalize_deciangle(sample_phase_);
 
         avg_dc_angle_ = (dc_angle_ * FLAGS_avg_angle_weight +
@@ -540,8 +549,7 @@ protected:
                                              FLAGS_preamp_off_time +
                                              FLAGS_preamp_off_transition_time);
                     last_block_ = ((last_block_secs *
-                                    args_->sdr_sample_rate) /
-                                   (args_->block_len - args_->history_len)
+                                    args_->sdr_sample_rate) / nonhistory_size_
                                    + block_idx_);
                     printf("block %u: Found first beacon.\n"
                            "We'll stop after %.1f seconds "
@@ -554,7 +562,7 @@ protected:
                                              FLAGS_preamp_off_transition_time);
                     preamp_off_block_ = ((preamp_off_secs
                                           * args_->sdr_sample_rate)
-                                          / (args_->block_len - args_->history_len)
+                                          / nonhistory_size_
                                          + block_idx_);
                 }
 
@@ -589,13 +597,13 @@ protected:
             //// Carrier tracking and synchronization
             freq_shift(synced_signal_,
                        to_complex_star(carrier_det_->data().samples),
-                       args_->block_len,
+                       block_size_,
                        -carrier_pos_,
                        sample_phase_);
 
             prev_dc_angle_ = dc_angle_;
 
-            complex<float> dc = calculate_dc(synced_signal_, args_->block_len);
+            complex<float> dc = calculate_dc(synced_signal_, block_size_);
             dc_ampl_ = abs(dc);
             dc_angle_ = normalize_deciangle(arg(dc) / (float)PI / 2);
 
@@ -628,8 +636,8 @@ protected:
                 carrier_pos_ = carrier.detection.argmax + carrier_offset;
 
                 // calculate signed index
-                if (carrier_pos_ > args_->block_len / 2) {
-                    carrier_pos_ -= args_->block_len;
+                if (carrier_pos_ > block_size_ / 2) {
+                    carrier_pos_ -= block_size_;
                 }
                 
                 printf("block #%u: Detected carrier @ %.3f; SNR: %.1f / %.1f\n",
@@ -643,11 +651,11 @@ protected:
                 // perform freq shift
                 freq_shift(synced_signal_,
                            to_complex_star(carrier_det_->data().samples),
-                           args_->block_len,
+                           block_size_,
                            -carrier_pos_,
                            sample_phase_);
 
-                complex<float> dc = calculate_dc(synced_signal_, args_->block_len);
+                complex<float> dc = calculate_dc(synced_signal_, block_size_);
                 dc_ampl_ = abs(dc);
                 dc_angle_ = normalize_deciangle(arg(dc) / (float)PI / 2);
 
@@ -670,8 +678,8 @@ protected:
                    corr.peak_power);
             
             prev_soa_ = soa_;
-            soa_ = ((args_->block_len - args_->history_len) *
-                     block_idx_ + corr.peak_idx) + corr.peak_offset;
+            soa_ = (nonhistory_size_ * block_idx_
+                    + corr.peak_idx + corr.peak_offset);
             float time_step = (soa_ - prev_soa_) / args_->sdr_sample_rate;
 
             if ((beacon_ > 0) && (time_step > 1.5 * FLAGS_beacon_interval)) {
@@ -701,11 +709,10 @@ protected:
             double start = (soa_
                             + (FLAGS_beacon_padding + cycle_ * corr_size_)
                              * (1 - clock_error_)
-                           - block_idx_
-                             * (args_->block_len - args_->history_len));
+                           - block_idx_ * nonhistory_size_);
             size_t start_idx = int(round(start));
 
-            if (start_idx + corr_size_ > args_->block_len) {
+            if (start_idx + corr_size_ > block_size_) {
                 break;
             }
 
@@ -722,7 +729,7 @@ protected:
                       corr_size_,
                       start - start_idx,
                       -avg_dc_angle_,
-                      -carrier_pos_ * corr_size_ / args_->block_len);
+                      -carrier_pos_ * corr_size_ / block_size_);
 
             DeciAngle error = arg(corrected_corr_fft_.data()[0]) / 2 / PI;
             if (abs(error) > 0.2) {
@@ -759,12 +766,16 @@ protected:
     // frequency. It is assumed that the downconverter and ADC have the same
     // local oscillator (i.e. that they are coherent).
     float estimate_clock_error() {
-        return (carrier_pos_ * args_->sdr_sample_rate / args_->block_len
+        return (carrier_pos_ * args_->sdr_sample_rate / block_size_
                 - FLAGS_carrier_ref) / args_->sdr_freq;
     }
 
 private:
     fargs_t* args_;
+
+    size_t block_size_;
+    size_t history_size_;
+    size_t nonhistory_size_;
 
     // Read input and perform carrier detection using fastcard.
     std::unique_ptr<CarrierDetector> carrier_det_;
