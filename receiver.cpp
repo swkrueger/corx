@@ -341,11 +341,11 @@ private:
 };
 
 
-class ArrayDetector {
+class CorxReceiver {
 public:
-    // Warning: args should outlive ArrayDetector
+    // Warning: args should outlive CorxReceiver
     //  (TODO: use unique_ptr and move ownership of args)
-    ArrayDetector(fargs_t* args,
+    CorxReceiver(fargs_t* args,
                   std::string template_file,
                   float corr_thresh_const,
                   float corr_thresh_snr,
@@ -915,7 +915,7 @@ static void parse_fargs(fargs_t* fargs) {
     fargs->sdr_dev_index = FLAGS_device_index;
 }
 
-std::unique_ptr<ArrayDetector> detector;
+std::unique_ptr<CorxReceiver> detector;
 
 void signal_handler(int signo) {
     (void)signo;  // unused
@@ -954,14 +954,14 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    detector.reset(new ArrayDetector(args.get(),
-                                     FLAGS_template,
-                                     arg_corr_thresh_const,
-                                     arg_corr_thresh_snr,
-                                     FLAGS_segment_size,
-                                     slice_start,
-                                     slice_len,
-                                     CFile(FLAGS_output)));
+    detector.reset(new CorxReceiver(args.get(),
+                                    FLAGS_template,
+                                    arg_corr_thresh_const,
+                                    arg_corr_thresh_snr,
+                                    FLAGS_segment_size,
+                                    slice_start,
+                                    slice_len,
+                                    CFile(FLAGS_output)));
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
