@@ -1,6 +1,7 @@
 // A quick-n-dirty proof-of-concept fast C++ implementation.
 
-// requires librtlsdr from https://github.com/rtlsdrblog/rtl-sdr
+// requires librtlsdr with software-switchable bias tee support
+// (https://github.com/rtlsdrblog/rtl-sdr)
 #define LIBRTLSDR_BIAS_TEE_SUPPORT
 
 #include <algorithm>
@@ -77,30 +78,74 @@ DEFINE_string(template, "template.tpl",
 DEFINE_string(output, "",
               ".corx file to write output to");
 
+DEFINE_double(carrier_ref, -277800,
+              "The expected nominal frequency offset of the reference "
+              "transmitter's carrier, in Hertz. "
+              "Used for estimating the clock error.");
+DEFINE_double(beacon_interval, 1.0,
+              "Nominal time interval between subsequent beacon "
+              "transmissions, in seconds");
+DEFINE_uint64(segment_size, 1024,
+              "size of small fixed-sized chunks of data used for "
+              "cross-correlation");
+DEFINE_uint64(beacon_padding, 6000,
+              "Number of samples to skip before and after a beacon signal,"
+              "i.e. between a beacon signal and the first correlation block");
 
-#define MAX_TRACKING_ANGLE_DIFF 50
-#define TRACKING_ANGLE_DIFF_FACTOR 0.2
-#define AVG_ANGLE_WEIGHT 0.1
-#define BEACON_INTERVAL_SEC 1
+DEFINE_double(max_tracking_phase_diff, 50,
+             "Maximum phase difference between subsequent blocks of data "
+             "to be tolerated by the phase lock loop (in degrees)");
+DEFINE_double(tracking_diff_coeff, 0.2,
+              "Coefficient for derivative term of the carrier tracking loop.");
+DEFINE_double(avg_angle_weight, 0.1,
+              "Weighting factor for the Exponential Moving Average of the "
+              "carrier phase");
+DEFINE_double(avg_mag_weight, 0.1,
+              "Weighting factor for the Exponential Moving Average of the "
+              "carrier magnitude");
+DEFINE_double(beacon_carrier_trigger_factor, 0.8,
+              "Only search for presence of a beacon signal when the carrier "
+              "magnitude is less than the average carrier magnitude times "
+              "this factor.");
 
-// time in seconds to capture after the first beacon detection
-#define MAX_CAPTURE_TIME 10.1
+DEFINE_double(capture_time, 10.1,
+              "time in seconds to capture correlation data after the first "
+              "beacon detection");
+DEFINE_double(preamp_off_time, 2.0,
+              "time in seconds to capture data with the preamp switched off "
+              "after --capture_time");
+DEFINE_double(preamp_off_transition_time, 0.2,
+              "time in seconds to wait after the preamp has been switced off "
+              "and before data is being captured with the preamp off");
 
-// number of seconds after MAX_CAPTURE_TIME to capture data with the preamp
-// switched off.
-#define PREAMP_OFF_TIME 2.0
+DEFINE_string(slice, "0--1",
+              "Only store the specified slice of the correlation segment FFTs");
 
-// amount of data to skip (in seconds) after the preamp is switced off and before data is being captured with the preamp off.
-#define PREAMP_OFF_TRANSITION_TIME 0.2
 
-// #define OUTPUT_WINDOW_START 750
-// #define OUTPUT_WINDOW_LEN 200
+bool parse_slice_str(const std::string &slice, int segment_size,
+                     int& start, int& len) {
+    int stop;
+    int r = sscanf(slice.data(), "%d-%d", &start, &stop);
 
-#define OUTPUT_WINDOW_START 0
-#define OUTPUT_WINDOW_LEN -1
+    if (r == 1) {
+        stop = start;
+    } else if (r != 2) {
+        return false;
+    }
 
-#define BEACON_CARRIER_TRIGGER_FACTOR 0.8
-#define AVG_AMPL_WEIGHT 0.1
+    if (start < 0) {
+        start = segment_size + start;
+    }
+    if (stop < 0) {
+        stop = segment_size + stop;
+    }
+    if (start >= segment_size || stop >= segment_size) {
+        return false;
+    }
+
+    len = stop - start + 1;
+    return true;
+}
 
 
 // Angles are stored as a value between -0.5 and 0.5 to simplify normalisation
@@ -299,6 +344,8 @@ public:
                   float corr_thresh_const,
                   float corr_thresh_snr,
                   int corr_size,
+                  int slice_start,
+                  int slice_len,
                   CFile&& out)
                 : args_(args),
                   synced_fft_calc_(args->block_len, true),
@@ -323,12 +370,13 @@ public:
 
         blocks_skip_ = args_->skip;
         
-        num_cycles_ = ((args_->sdr_sample_rate - 2*skip_beacon_padding_) / 
+        num_cycles_ = ((FLAGS_beacon_interval * args_->sdr_sample_rate
+                        - 2*FLAGS_beacon_padding) / 
                        corr_size_);
 
-        slice_start_ = max(0, OUTPUT_WINDOW_START);
-        slice_len_ = (OUTPUT_WINDOW_LEN <= 0) ? corr_size_
-                     : min(corr_size_, (size_t)OUTPUT_WINDOW_LEN);
+        slice_start_ = max(0, slice_start);
+        slice_len_ = (slice_len <= 0) ? corr_size_-slice_start_
+                     : min(corr_size_-slice_start_, (size_t)slice_len);
 
     }
 
@@ -411,7 +459,8 @@ protected:
 
             set_bias_tee(false);
 
-            blocks_skip_ = (PREAMP_OFF_TRANSITION_TIME * args_->sdr_sample_rate
+            blocks_skip_ = (FLAGS_preamp_off_transition_time
+                            * args_->sdr_sample_rate
                             / (args_->block_len - args_->history_len));
             printf("Skipping %d blocks...\n", blocks_skip_);
         }
@@ -460,16 +509,16 @@ protected:
                                                       args_->block_len);
         sample_phase_ = normalize_deciangle(sample_phase_);
 
-        avg_dc_angle_ = (dc_angle_ * AVG_ANGLE_WEIGHT +
-                         avg_dc_angle_ * (1-AVG_ANGLE_WEIGHT));
-        avg_dc_ampl_ = (dc_ampl_ * AVG_AMPL_WEIGHT +
-                         avg_dc_ampl_ * (1-AVG_AMPL_WEIGHT));
+        avg_dc_angle_ = (dc_angle_ * FLAGS_avg_angle_weight +
+                         avg_dc_angle_ * (1-FLAGS_avg_angle_weight));
+        avg_dc_ampl_ = (dc_ampl_ * FLAGS_avg_mag_weight +
+                         avg_dc_ampl_ * (1-FLAGS_avg_mag_weight));
 
         if (!detected_carrier_) {
             return;
         }
 
-        if (cycle_ == -1 && dc_ampl_ < avg_dc_ampl_ * BEACON_CARRIER_TRIGGER_FACTOR) {
+        if (cycle_ == -1 && dc_ampl_ < avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor) {
             printf("DC: %.1f; avg: %.1f\n", dc_ampl_, avg_dc_ampl_);
 
             // TODO: use change in signal strength to determine whether it is
@@ -487,10 +536,10 @@ protected:
                 num_phase_errors_ = 0;
 
                 if (beacon_ == 0) {
-                    float last_block_time = (MAX_CAPTURE_TIME +
-                                             PREAMP_OFF_TIME +
-                                             PREAMP_OFF_TRANSITION_TIME);
-                    last_block_ = ((last_block_time *
+                    float last_block_secs = (FLAGS_capture_time +
+                                             FLAGS_preamp_off_time +
+                                             FLAGS_preamp_off_transition_time);
+                    last_block_ = ((last_block_secs *
                                     args_->sdr_sample_rate) /
                                    (args_->block_len - args_->history_len)
                                    + block_idx_);
@@ -498,12 +547,12 @@ protected:
                            "We'll stop after %.1f seconds "
                            "(at block block #%u).\n",
                            block_idx_,
-                           last_block_time,
+                           last_block_secs,
                            last_block_);
 
-                    float preamp_off_time = (MAX_CAPTURE_TIME +
-                                             PREAMP_OFF_TRANSITION_TIME);
-                    preamp_off_block_ = ((preamp_off_time
+                    float preamp_off_secs = (FLAGS_capture_time +
+                                             FLAGS_preamp_off_transition_time);
+                    preamp_off_block_ = ((preamp_off_secs
                                           * args_->sdr_sample_rate)
                                           / (args_->block_len - args_->history_len)
                                          + block_idx_);
@@ -556,13 +605,13 @@ protected:
             //        block_idx_,
             //        angle_diff * 360);
 
-            if (angle_diff * 360 > MAX_TRACKING_ANGLE_DIFF) {
+            if (angle_diff * 360 > FLAGS_max_tracking_phase_diff) {
                 // tracking loop failed
                 detected_carrier_ = false;
                 printf("block #%u: Tracking loop failed\n", block_idx_);
             } else {
                 // track
-                carrier_pos_ += angle_diff * TRACKING_ANGLE_DIFF_FACTOR;
+                carrier_pos_ += angle_diff * FLAGS_tracking_diff_coeff;
             }
         }
 
@@ -625,7 +674,7 @@ protected:
                      block_idx_ + corr.peak_idx) + corr.peak_offset;
             float time_step = (soa_ - prev_soa_) / args_->sdr_sample_rate;
 
-            if ((beacon_ > 0) && (time_step > 1.5 * BEACON_INTERVAL_SEC)) {
+            if ((beacon_ > 0) && (time_step > 1.5 * FLAGS_beacon_interval)) {
                 // We missed a pulse. Estimate beacon index from sample index.
                 printf("Large time step!\n");
                 beacon_ += (int)round(time_step);
@@ -650,7 +699,7 @@ protected:
         for (; cycle_ < num_cycles_; ++cycle_) {
             // calculate index of first sample in correlation block
             double start = (soa_
-                            + (skip_beacon_padding_ + cycle_ * corr_size_)
+                            + (FLAGS_beacon_padding + cycle_ * corr_size_)
                              * (1 - clock_error_)
                            - block_idx_
                              * (args_->block_len - args_->history_len));
@@ -711,7 +760,7 @@ protected:
     // local oscillator (i.e. that they are coherent).
     float estimate_clock_error() {
         return (carrier_pos_ * args_->sdr_sample_rate / args_->block_len
-                - carrier_ref_) / args_->sdr_freq;
+                - FLAGS_carrier_ref) / args_->sdr_freq;
     }
 
 private:
@@ -748,10 +797,6 @@ private:
     DeciAngle prev_dc_angle_;
     float dc_ampl_;
 
-    // The expected frequency offset in bins used as reference for estiamting
-    // the clock error.
-    float carrier_ref_ = -277800;
-
     // Estimated clock error.
     float clock_error_;
 
@@ -776,10 +821,6 @@ private:
     // Correlation block within block of data between subsequent beacons.
     // -1: waiting for first pulse
     int32_t cycle_ = -1;
-
-    // Number of samples to skip before and after the SOA of a beacon,
-    // i.e. between a beacon pulse and the first correlation block
-    int skip_beacon_padding_ = 6000;
 
     // Synced signal, i.e. signal after carrier recovery.
     FFT synced_fft_calc_;
@@ -865,6 +906,17 @@ int main(int argc, char **argv) {
                 FLAGS_carrier_window.c_str());
         exit(1);
     }
+
+    int slice_start, slice_len;
+    if (!parse_slice_str(FLAGS_slice,
+                         FLAGS_segment_size,
+                         slice_start,
+                         slice_len)) {
+        fprintf(stderr, "Invalid value for --slice: %s\n",
+                FLAGS_carrier_window.c_str());
+        exit(1);
+    }
+
     if (argc > 1) {
         fprintf(stderr, "We do not take positional arguments\n");
         exit(1);
@@ -874,7 +926,9 @@ int main(int argc, char **argv) {
                                      FLAGS_template,
                                      arg_corr_thresh_const,
                                      arg_corr_thresh_snr,
-                                     1024,
+                                     FLAGS_segment_size,
+                                     slice_start,
+                                     slice_len,
                                      CFile(FLAGS_output)));
 
     signal(SIGINT, signal_handler);
