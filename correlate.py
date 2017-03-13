@@ -70,7 +70,7 @@ def correlate(corx1, corx2, period):
             if not header2.preamp_on:
                 for _, fft2 in cycles2:
                     autocorr2_off_sum += fft2 * fft2.conjugate()
-                    autocorr2_off_cnt += 2
+                    autocorr2_off_cnt += 1
             timediff = 0  # force both readers to be moved forward
 
         elif abs(timediff) < timediff_thresh:

@@ -30,8 +30,7 @@
 
 using namespace std;
 
-#define _USE_MATH_DEFINES
-#define PI M_PI
+#define PI 3.14159265358979323846
 
 #define MAX_TRACKING_ANGLE_DIFF 50
 #define TRACKING_ANGLE_DIFF_FACTOR 0.2
@@ -45,8 +44,8 @@ using namespace std;
 // switched off.
 #define PREAMP_OFF_TIME 2.0
 
-// amount of data to skip (in seconds) after the preamp is switced off.
-#define PREAMP_OFF_SKIP 0.2
+// amount of data to skip (in seconds) after the preamp is switced off and before data is being captured with the preamp off.
+#define PREAMP_OFF_TRANSITION_TIME 0.2
 
 // #define OUTPUT_WINDOW_START 750
 // #define OUTPUT_WINDOW_LEN 200
@@ -55,7 +54,7 @@ using namespace std;
 #define OUTPUT_WINDOW_LEN -1
 
 #define BEACON_CARRIER_TRIGGER_FACTOR 0.8
-#define AVG_DCAMPL_WEIGHT 0.1
+#define AVG_AMPL_WEIGHT 0.1
 
 
 // Angles are stored as a value between -0.5 and 0.5 to simplify normalisation
@@ -313,21 +312,8 @@ public:
     }
 
     bool next() {
-        if (preamp_off_block_ > 0 && block_idx_ == preamp_off_block_) {
-            printf("block #%d: Switching off preamp...\n", block_idx_);
-
-            if (cycle_ >= 0) {
-                cycle_ = -1;
-                writer_.write_cycle_stop();
-            }
-
-            set_bias_tee(false);
-
-            blocks_skip_ = (PREAMP_OFF_SKIP * args_->sdr_sample_rate /
-                            (args_->block_len - args_->history_len));
-            printf("Skipping %d blocks...\n", blocks_skip_);
-        }
-
+        // TODO: set last_block_ to FIRST_BEACON_SEARCH_TIMEOUT...
+        //       ... output "timeout: failed to find first beacon"
         if (last_block_ > 0 && block_idx_ == last_block_) {
             carrier_det_->cancel();
         }
@@ -349,7 +335,42 @@ public:
             return true;
         }
 
-        if (preamp_off_block_ > 0 && block_idx_ > preamp_off_block_) {
+        if (preamp_off_block_ > 0 && block_idx_ == preamp_off_block_) {
+            next_preamp_off();
+        } else {
+            next_preamp_on();
+        }
+
+        return true;
+    }
+
+    void cancel() {
+        if (carrier_det_) {
+            carrier_det_->cancel();
+        }
+    }
+
+protected:
+    // Capture raw data without performing carrier or beacon detection using
+    // the last known carrier frequency for carrier recovery.
+    void next_preamp_off() {
+        // FIXME: Clean up preamp logic scattered around next() function
+        if (block_idx_ == preamp_off_block_) {
+            printf("block #%d: Switching off preamp...\n", block_idx_);
+
+            if (cycle_ >= 0) {
+                cycle_ = -1;
+                writer_.write_cycle_stop();
+            }
+
+            set_bias_tee(false);
+
+            blocks_skip_ = (PREAMP_OFF_TRANSITION_TIME * args_->sdr_sample_rate
+                            / (args_->block_len - args_->history_len));
+            printf("Skipping %d blocks...\n", blocks_skip_);
+        }
+
+        if (block_idx_ > preamp_off_block_) {
             // continue with last carrier frequency from when the preamp was on
             freq_shift(synced_signal_,
                        to_complex_star(carrier_det_->data().samples),
@@ -382,10 +403,10 @@ public:
             }
 
             extract_corr_blocks();
-
-            return true;
         }
+    }
 
+    void next_preamp_on() {
         // calculate detected_carrier_, synced_signal_ and dc_angle_.
         recover_carrier();
 
@@ -395,11 +416,11 @@ public:
 
         avg_dc_angle_ = (dc_angle_ * AVG_ANGLE_WEIGHT +
                          avg_dc_angle_ * (1-AVG_ANGLE_WEIGHT));
-        avg_dc_ampl_ = (dc_ampl_ * AVG_DCAMPL_WEIGHT +
-                         avg_dc_ampl_ * (1-AVG_DCAMPL_WEIGHT));
+        avg_dc_ampl_ = (dc_ampl_ * AVG_AMPL_WEIGHT +
+                         avg_dc_ampl_ * (1-AVG_AMPL_WEIGHT));
 
         if (!detected_carrier_) {
-            return true;
+            return;
         }
 
         if (cycle_ == -1 && dc_ampl_ < avg_dc_ampl_ * BEACON_CARRIER_TRIGGER_FACTOR) {
@@ -416,12 +437,14 @@ public:
                        beacon_,
                        clock_error_ * 1e6);
 
-                // TODO: Asoa.append([pulse,soa,CarrierPosition,ppm]);
                 cycle_ = 0;
                 num_phase_errors_ = 0;
 
                 if (beacon_ == 0) {
-                    last_block_ = (((MAX_CAPTURE_TIME + PREAMP_OFF_TIME) *
+                    float last_block_time = (MAX_CAPTURE_TIME +
+                                             PREAMP_OFF_TIME +
+                                             PREAMP_OFF_TRANSITION_TIME);
+                    last_block_ = ((last_block_time *
                                     args_->sdr_sample_rate) /
                                    (args_->block_len - args_->history_len)
                                    + block_idx_);
@@ -429,10 +452,12 @@ public:
                            "We'll stop after %.1f seconds "
                            "(at block block #%u).\n",
                            block_idx_,
-                           (double)MAX_CAPTURE_TIME + PREAMP_OFF_TIME,
+                           last_block_time,
                            last_block_);
 
-                    preamp_off_block_ = ((MAX_CAPTURE_TIME
+                    float preamp_off_time = (MAX_CAPTURE_TIME +
+                                             PREAMP_OFF_TRANSITION_TIME);
+                    preamp_off_block_ = ((preamp_off_time
                                           * args_->sdr_sample_rate)
                                           / (args_->block_len - args_->history_len)
                                          + block_idx_);
@@ -459,17 +484,8 @@ public:
         if (cycle_ >= 0) {
             extract_corr_blocks();  // pass parameters, e.g. clock_error_
         }
-
-        return true;
     }
 
-    void cancel() {
-        if (carrier_det_) {
-            carrier_det_->cancel();
-        }
-    }
-
-protected:
     // Synchronise to / track the carrier.
     // Sets detected_carrier_, synced_signal_ and dc_angle_.
     // Returns false if carrier detection fails.
