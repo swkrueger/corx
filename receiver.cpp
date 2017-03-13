@@ -21,7 +21,6 @@
 
 #include <gflags/gflags.h>
 
-
 // fastcard and fastdet headers
 #include <fastdet/corr_detector.h>
 #include <fastdet/fastcard_wrappers.h>
@@ -163,18 +162,6 @@ DeciAngle normalize_deciangle(DeciAngle angle) {
 }
 
 
-void freq_shift_slow(complex<float> *dest,
-                const complex<float> *src,
-                size_t len,
-                float shift_freq,
-                DeciAngle shift_phase) {
-    for (size_t i = 0; i < len; ++i) {
-        dest[i] = exp(complex<float>(0, 2) * (float)PI * (shift_freq * i / (float)len + shift_phase)) * src[i];
-        // dest[i] = SineLookup::expj(2 * (float)PI * (shift_freq * i / (float)len + shift_phase)) * src[i];
-    }
-}
-
-
 // Apply a frequency and phase shift to the given signal.
 // src and dest may be the same for inline transformation.
 void freq_shift(complex<float> *dest,
@@ -196,13 +183,6 @@ void fft_shift(complex<float> *dest,
                 float shift_freq,
                 DeciAngle shift_phase,
                 size_t carrier_offset) {
-    // freq_shift(dest, src, len, shift_freq, shift_phase);
-    // complex<float> phase_fix = SineLookup::expj(-2 * (float)PI * shift_freq);
-    // for (size_t i = (len+1)/2 + carrier_offset; i < len; ++i) {
-    //     dest[i] *= phase_fix;
-    // }
-
-    // Alternative:
     SineLookupNCO nco(2 * (float)PI * shift_phase,
                       2 * (float)PI * shift_freq / (float)len);
     size_t pos_len = (len+1)/2 + carrier_offset;  // number of positive frequency components
@@ -212,33 +192,18 @@ void fft_shift(complex<float> *dest,
 }
 
 
+// Calculate the 0 Hz frequency component from a time-domain signal
 complex<float> calculate_dc(complex<float> *signal, size_t len) {
     std::complex<float> sum = std::accumulate(signal,
                                               signal + len,
                                               std::complex<float>(0, 0));
-    return sum;  // / (float)len;
-    // TODO: compare to fft(signal)
+    return sum;
 }
-
-
-// // Calculate the complex argument at 0 Hz from a time-domain signal
-// DeciAngle calculate_dc_phase(complex<float> *signal, size_t len) {
-//     std::complex<float> sum = std::accumulate(signal,
-//                                               signal + len,
-//                                               std::complex<float>(0, 0));
-// 
-//     // calculate spectral density at DC
-//     complex<float> dc = sum / (float)len;
-//     return normalize_deciangle(arg(dc) / (float)PI / 2);
-// }
 
 
 inline complex<float>* to_complex_star(fcomplex* array) {
     return reinterpret_cast<complex<float>*>(array);
 }
-
-
-
 
 
 
@@ -291,7 +256,6 @@ public:
     }
 
     bool set_bias_tee(bool on) {
-//#ifdef HAS_RTLSDR_BIAS
         if (strcmp(args_->input_file, "rtlsdr") != 0) {
             return false;
         }
@@ -619,10 +583,6 @@ protected:
     }
 
     void extract_corr_blocks() {
-        // if (cycle_ == 0) {
-        //     // write beacon header
-        // }
-
         for (; cycle_ < num_cycles_; ++cycle_) {
             // calculate index of first sample in correlation block
             double start = (soa_
@@ -653,7 +613,6 @@ protected:
             DeciAngle error = arg(corrected_corr_fft_.data()[0]) / 2 / PI;
             if (abs(error) > 0.2) {
                 num_phase_errors_++;
-                // printf("Phase error > 0.2: %f\n", error);
             }
 
 
@@ -807,9 +766,6 @@ static void parse_fargs(fargs_t* fargs) {
     fargs->history_len = FLAGS_history_size;
     fargs->skip = FLAGS_skip;
 
-    // if (FLAGS_frequency.size() == 0 || FLAGS_sample_rate.size() == 0) {
-    //     exit(1);
-    // }
     fargs->sdr_freq = (uint32_t)parse_si_float(&FLAGS_frequency[0]);
     fargs->sdr_gain = (int)FLAGS_gain * 10; // unit: tenths of a dB
     fargs->sdr_sample_rate = (uint32_t)parse_si_float(&FLAGS_sample_rate[0]);
