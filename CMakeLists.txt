@@ -43,7 +43,7 @@ include_directories(
     ${VOLK_INCLUDE_DIRS}
 )
 
-add_executable(corx_rx receiver.cpp sine_lookup.cpp)
+add_executable(corx_rx receiver.cpp sine_lookup.cpp corx_file_writer.cpp)
 target_link_libraries (corx_rx
                        ${FASTDET_LIBRARIES}
                        ${FASTCARD_LIBRARIES}

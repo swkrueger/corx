@@ -28,6 +28,7 @@
 #include <fastcard/parse.h>
 #include <fastcard/rtlsdr_reader.h>
 
+#include "corx_file_writer.h"
 #include "sine_lookup.h"
 
 using namespace std;
@@ -237,108 +238,8 @@ inline complex<float>* to_complex_star(fcomplex* array) {
 }
 
 
-struct CorxFileHeader {
-    uint16_t slice_start_idx;
-    uint16_t slice_size;  // a.k.a. corr block length
-} __attribute__((packed));
 
 
-struct CorxBeaconHeader {
-    double soa;
-    uint64_t timestamp_sec;
-    uint16_t timestamp_msec;
-    uint32_t beacon_amplitude;
-    uint32_t beacon_noise;
-    float clock_error;
-    float carrier_pos;
-    uint32_t carrier_amplitude;
-    bool preamp_on;
-} __attribute__((packed));
-
-
-// Assumptions:
-//  - structs are byte-aligned
-//  - ints are little endian
-//  - IEEE floating points
-// TODO: better portability (e.g. do not memcpy structs)
-class CorxFileWriter {
-public:
-    CorxFileWriter(CFile&& out)
-        : out_(std::move(out)), slice_size_(0) {};
-
-    void write_file_header(const CorxFileHeader &header) {
-        if (is_void()) {
-            return;
-        }
-
-        // output file signature
-        fprintf(out_.file(), "CORX");
-
-        // output file format version
-        fputc(version, out_.file());
-
-        // output file header
-        fwrite(reinterpret_cast<const char*>(&header),
-               sizeof(header),
-               1,
-               out_.file());
-
-        slice_size_ = header.slice_size;
-    }
-
-    void write_cycle_start(const CorxBeaconHeader &header) {
-        // sein sterkte: carrier, beacon
-        if (is_void()) {
-            return;
-        }
-
-        fwrite(reinterpret_cast<const char*>(&header),
-               sizeof(header),
-               1,
-               out_.file());
-    }
-
-    void write_cycle_block(int8_t phase_error,
-                           const complex<float> *data,
-                           uint16_t len) {
-        if (is_void()) {
-            return;
-        }
-
-        assert(len == slice_size_);
-        assert(phase_error != -128);
-        write_cycle_block_internal(phase_error, data, len);
-    }
-
-    void write_cycle_stop() {
-        if (is_void()) {
-            return;
-        }
-
-        // indicate end of cycle
-        write_cycle_block_internal(-128, NULL, 0);
-    }
-
-    bool is_void() {
-        return out_.file() == nullptr;
-    }
-
-private:
-    void write_cycle_block_internal(int8_t phase_error,
-                                    const complex<float> *data,
-                                    uint16_t len) {
-        fputc(phase_error, out_.file());
-
-        fwrite(data,
-               sizeof(complex<float>),
-               len,
-               out_.file());
-    }
-
-    CFile out_;
-    int slice_size_;
-    const static uint8_t version = 0x01;
-};
 
 
 class CorxReceiver {
