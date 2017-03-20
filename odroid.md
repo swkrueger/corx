@@ -150,6 +150,6 @@ Build
 ```
 cd ~/corx
 mkdir build && cd build
-cmake ..
+cmake ../src
 make
 ```

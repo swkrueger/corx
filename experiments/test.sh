@@ -3,4 +3,4 @@
 set -e
 
 source settings.sh
-build/corx_rx ${PARAMS} "$@"
+../build/corx_rx ${PARAMS} "$@"
