@@ -1,6 +1,7 @@
 #!/bin/bash
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+chmod 600 "$DIR/id_rsa"
 
 s="$1"
 shift 1

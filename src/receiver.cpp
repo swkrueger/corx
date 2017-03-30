@@ -314,7 +314,7 @@ public:
             return true;
         }
 
-        if (preamp_off_block_ > 0 && block_idx_ == preamp_off_block_) {
+        if (preamp_off_block_ > 0 && block_idx_ >= preamp_off_block_) {
             next_preamp_off();
         } else {
             next_preamp_on();
@@ -392,14 +392,14 @@ protected:
                           (1.f - (float)history_size_ / block_size_));
         sample_phase_ = normalize_deciangle(sample_phase_);
 
-        avg_dc_angle_ = (dc_angle_ * FLAGS_avg_angle_weight +
-                         avg_dc_angle_ * (1-FLAGS_avg_angle_weight));
-        avg_dc_ampl_ = (dc_ampl_ * FLAGS_avg_mag_weight +
-                         avg_dc_ampl_ * (1-FLAGS_avg_mag_weight));
-
         if (!detected_carrier_) {
             return;
         }
+
+        avg_dc_angle_ = (dc_angle_ * (float)FLAGS_avg_angle_weight +
+                         avg_dc_angle_ * (1-(float)FLAGS_avg_angle_weight));
+        avg_dc_ampl_ = (dc_ampl_ * (float)FLAGS_avg_mag_weight +
+                        avg_dc_ampl_ * (1-(float)FLAGS_avg_mag_weight));
 
         if (cycle_ == -1 && dc_ampl_ < avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor) {
             printf("DC: %.1f; avg: %.1f\n", dc_ampl_, avg_dc_ampl_);
@@ -687,7 +687,7 @@ private:
     // Complex argument at DC frequency
     DeciAngle dc_angle_ = 0;
     DeciAngle prev_dc_angle_;
-    float dc_ampl_;
+    float dc_ampl_ = 0;
 
     // Estimated clock error.
     float clock_error_;

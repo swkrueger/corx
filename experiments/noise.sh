@@ -9,11 +9,11 @@ SYS_GPIO=/sys/class/gpio
 NUM_NOISE_GENS=${#NOISE_GPIO[@]}
 
 function noise_on {
-    echo 0 > $SYS_GPIO/gpio${NOISE_GPIO[$1]}
+    echo 0 > $SYS_GPIO/gpio${NOISE_GPIO[$1]}/value
 }
 
 function noise_off {
-    echo 1 > $SYS_GPIO/gpio${NOISE_GPIO[$1]}
+    echo 1 > $SYS_GPIO/gpio${NOISE_GPIO[$1]}/value
 }
 
 function noise_init {
