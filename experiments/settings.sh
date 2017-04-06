@@ -1,3 +1,4 @@
+ODROID_ID="A"
 CORX_PATH="temp/"
 CORRS_PATH="out/"
 LOG_PATH="log/"

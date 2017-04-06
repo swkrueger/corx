@@ -11,4 +11,4 @@ for f in "$@"; do
     cmd="$cmd\nput $f"
 done
 
-printf "$cmd" | sftp -P 2222 -b- -i "$DIR/id_rsa" "$s" || exit 1
+printf "$cmd" | sftp -p -P 2222 -b- -i "$DIR/id_rsa" "$s" || exit 1
