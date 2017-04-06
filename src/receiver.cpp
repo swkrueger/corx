@@ -43,6 +43,8 @@ DEFINE_string(input, "rtlsdr",
 DEFINE_string(wisdom, "",
               "Wisfom file to use for FFT calculation"
               "\n[default: don't use wisdom file]");
+DEFINE_string(debug, "",
+              "File for temporary debugging output");
 
 // Block settings
 DEFINE_uint64(block_size, 16384,
@@ -227,7 +229,8 @@ public:
                   corr_size_(corr_size),
                   corr_fft_calc_(corr_size, true),
                   corrected_corr_fft_(corr_size),
-                  writer_(std::move(out)) {
+                  writer_(std::move(out)),
+                  debug_(FLAGS_debug) {
 
         carrier_det_.reset(new CarrierDetector(args_));
         vector<float> template_samples = load_template(template_file);
@@ -396,16 +399,23 @@ protected:
             return;
         }
 
+        // mitigate rapid discontinuities at +-0.5
+        while (dc_angle_ > avg_dc_angle_+0.5) dc_angle_ -= 1;
+        while (dc_angle_ < avg_dc_angle_-0.5) dc_angle_ += 1;
+
         avg_dc_angle_ = (dc_angle_ * (float)FLAGS_avg_angle_weight +
                          avg_dc_angle_ * (1-(float)FLAGS_avg_angle_weight));
         avg_dc_ampl_ = (dc_ampl_ * (float)FLAGS_avg_mag_weight +
                         avg_dc_ampl_ * (1-(float)FLAGS_avg_mag_weight));
 
-        if (cycle_ == -1 && dc_ampl_ < avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor) {
-            printf("DC: %.1f; avg: %.1f\n", dc_ampl_, avg_dc_ampl_);
+        if (debug_.file() != nullptr) {
+            fwrite(&avg_dc_angle_, sizeof(float), 1, debug_.file());
+        }
 
-            // TODO: use change in signal strength to determine whether it is
-            // worth looking for a beacon signal
+        // use change in signal strength to determine whether it is worth
+        // looking for a beacon signal
+        if (cycle_ == -1 && dc_ampl_ > avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor) {
+            printf("DC: %.1f; avg: %.1f\n", dc_ampl_, avg_dc_ampl_);
 
             CorrDetection corr = find_beacon();
             if (corr.detected) {
@@ -494,6 +504,11 @@ protected:
             } else {
                 // track
                 carrier_pos_ += angle_diff * FLAGS_tracking_diff_coeff;
+
+                if (debug_.file() != nullptr) {
+                    fwrite(&carrier_pos_, sizeof(float), 1, debug_.file());
+                    fwrite(&dc_angle_, sizeof(float), 1, debug_.file());
+                }
             }
         }
 
@@ -513,12 +528,6 @@ protected:
                 if (carrier_pos_ > block_size_ / 2) {
                     carrier_pos_ -= block_size_;
                 }
-                
-                printf("block #%u: Detected carrier @ %.3f; SNR: %.1f / %.1f\n",
-                       block_idx_,
-                       carrier_pos_,
-                       carrier.detection.max,
-                       carrier.detection.noise);
 
                 detected_carrier_ = true;
 
@@ -532,6 +541,16 @@ protected:
                 complex<float> dc = calculate_dc(synced_signal_, block_size_);
                 dc_ampl_ = abs(dc);
                 dc_angle_ = normalize_deciangle(arg(dc) / (float)PI / 2);
+
+                avg_dc_ampl_ = dc_ampl_ * 2;
+                avg_dc_angle_ = dc_angle_;
+
+                printf("block #%u: Detected carrier @ %.3f; SNR: %.1f / %.1f; (DC: %.1f)\n",
+                       block_idx_,
+                       carrier_pos_,
+                       carrier.detection.max,
+                       carrier.detection.noise,
+                       dc_ampl_);
 
             } else {
                 printf("block #%u: No carrier detected\n", block_idx_);
@@ -740,6 +759,9 @@ private:
 
     // Output stream.
     CorxFileWriter writer_;
+
+    // Stream for temporary debugging output
+    CFile debug_;
 };
 
 
