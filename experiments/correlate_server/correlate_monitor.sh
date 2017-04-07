@@ -1,4 +1,8 @@
 #!/bin/bash
+#
+# Requires inotifywait. On Debian / Ubuntu:
+#     sudo apt install inotify-tools
+#
 
 set -u
 

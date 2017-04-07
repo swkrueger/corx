@@ -27,7 +27,7 @@ LogLevel INFO
 # Authentication:
 LoginGraceTime 120
 PermitRootLogin prohibit-password
-StrictModes yes
+StrictModes no
 
 RSAAuthentication yes
 PubkeyAuthentication yes
