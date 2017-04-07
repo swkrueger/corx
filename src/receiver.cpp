@@ -415,7 +415,12 @@ protected:
         // use change in signal strength to determine whether it is worth
         // looking for a beacon signal
         if (cycle_ == -1 && dc_ampl_ > avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor) {
-            printf("DC: %.1f; avg: %.1f\n", dc_ampl_, avg_dc_ampl_);
+            printf("block #%u: beacon check triggered: "
+                   "DC: %.1f; thresh: %.1f; avg: %.1f\n",
+                   block_idx_,
+                   dc_ampl_,
+                   avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor,
+                   avg_dc_ampl_);
 
             CorrDetection corr = find_beacon();
             if (corr.detected) {
@@ -435,7 +440,7 @@ protected:
                     last_block_ = ((last_block_secs *
                                     args_->sdr_sample_rate) / nonhistory_size_
                                    + block_idx_);
-                    printf("block %u: Found first beacon.\n"
+                    printf("block #%u: Found first beacon.\n"
                            "We'll stop after %.1f seconds "
                            "(at block block #%u).\n",
                            block_idx_,
