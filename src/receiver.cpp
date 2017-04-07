@@ -415,12 +415,12 @@ protected:
         // use change in signal strength to determine whether it is worth
         // looking for a beacon signal
         if (cycle_ == -1 && dc_ampl_ > avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor) {
-            printf("block #%u: beacon check triggered: "
-                   "DC: %.1f; thresh: %.1f; avg: %.1f\n",
+            printf("block #%u: beacon check. "
+                   "avg: %.0f; DC: %.0f; thresh: %.0f\n",
                    block_idx_,
+                   avg_dc_ampl_,
                    dc_ampl_,
-                   avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor,
-                   avg_dc_ampl_);
+                   avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor);
 
             CorrDetection corr = find_beacon();
             if (corr.detected) {
