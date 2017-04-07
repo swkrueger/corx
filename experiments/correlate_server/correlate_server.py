@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+
+from __future__ import print_function
 
 import fcntl
 import os
@@ -9,11 +11,10 @@ import sys
 import time
 from collections import deque
 
-assert sys.version_info > (3,0), "Please use Python 3"
-
 # Constants
 CORX_DIR = "/tmp/uploads/"
 CORR_DIR = "/tmp/corr/"
+LOG_DIR = "/tmp/corr/"
 CORRELATOR = "../../src/correlate.py"
 NUM_WORKERS = 4
 GROUP_SPAN = 10  # maximum difference in timestamp within a group (/2)
@@ -27,17 +28,31 @@ running_procs = {}
 groups = {}
 
 
-def run_task(task):
+def task_filename(task, ext='.npz'):
     group_key, filename1, filename2 = task
-    path1 = os.path.join(CORX_DIR, filename1)
-    path2 = os.path.join(CORX_DIR, filename1)
-
     rxid1 = extract_rxid(filename1)
     rxid2 = extract_rxid(filename2)
     noise_type = extract_noise_type(filename1)
-    output_filename = "corr_{}_{}_{}-{}.npz".format(group_key, noise_type,
-                                                    rxid1, rxid2)
+    filename = "corr_{}_{}_{}-{}{}".format(group_key, noise_type,
+                                           rxid1, rxid2, ext)
+    return filename
+
+
+def task_string(task):
+    group_key, filename1, filename2 = task
+    rxid1 = extract_rxid(filename1)
+    rxid2 = extract_rxid(filename2)
+    return "({}, {}, {})".format(group_key, rxid1, rxid2)
+
+
+def run_task(task):
+    _, filename1, filename2 = task
+    path1 = os.path.join(CORX_DIR, filename1)
+    path2 = os.path.join(CORX_DIR, filename2)
+
+    output_filename = task_filename(task, '.npz')
     output_path = os.path.join(CORR_DIR, output_filename)
+
     command = [CORRELATOR, path1, path2, "-o", output_path]
     # print(command)
     # command = ['sleep', '5']
@@ -47,8 +62,7 @@ def run_task(task):
     running_procs[fd] = (task, proc)
     poller.register(proc.stdout, select.EPOLLHUP)
 
-    print("Executing task: ({}, {}, {}) [PID: {}]"
-          .format(group_key, rxid1, rxid2, proc.pid))
+    print("Executing task: {} [PID: {}]".format(task_string(task), proc.pid))
 
 
 def process_queue():
@@ -158,22 +172,27 @@ def _main():
         for fd, _ in poller.poll():
             if fd == stdin_fd:
                 print("Received new input")
-                while True:
-                    line = sys.stdin.readline()
-                    if not line:
-                        break
-                    add_corx(line.strip('\n'))
-                    # TODO: check EOF
+                try:
+                    for line in sys.stdin:
+                        add_corx(line.strip('\n'))
+                except IOError:
+                    # Python 2.x seems to throw IOError for when reaching EOF.
+                    # Ignore it. What could possibly go wrong?
+                    pass
             else:
                 task, proc = running_procs[fd]
                 poller.unregister(fd)
                 running_procs.pop(fd)
 
-                group_key, filename1, filename2 = task
-                rxid1 = extract_rxid(filename1)
-                rxid2 = extract_rxid(filename2)
-                print("Task done: ({}, {}, {}) [PID: {}]"
-                      .format(group_key, rxid1, rxid2, proc.pid))
+                print("Task done: {} [PID: {}]"
+                      .format(task_string(task), proc.pid))
+
+                # write log
+                stdout, _ = proc.communicate()
+                log_filename = task_filename(task, '.log')
+                log_path = os.path.join(LOG_DIR, log_filename)
+                with open(log_path, 'wb') as f:
+                    f.write(stdout)
 
                 process_queue()
                 print("Tasks: {} running; {} in queue".format(len(running_procs),
