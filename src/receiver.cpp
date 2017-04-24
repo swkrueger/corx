@@ -224,47 +224,16 @@ bool isInactiveState(ReceiverState state) {
 // TODO: move to header (and user PIMPL?)
 class Receiver {
 public:
-    // Warning: args should outlive Receiver
-    //  (TODO: use unique_ptr and move ownership of args)
-    Receiver(fargs_t* args,  // TODO: calculate within class from flags
-             float corr_thresh_const,
-             float corr_thresh_snr,
-             int slice_start,
-             int slice_len,
-             CFile&& out)
-           : args_(args),
-             synced_fft_calc_(args->block_len, true),
-             corr_fft_calc_(FLAGS_segment_size, true),
-             corrected_corr_fft_(FLAGS_segment_size),
-             block_size_(args->block_len),
-             history_size_(args->history_len),
-             nonhistory_size_(args->block_len - args->history_len),
-             corr_size_(FLAGS_segment_size),
-             debug_(FLAGS_debug) {
-
+    Receiver() {
         state_ = ReceiverState::STOPPED;
         mode_ = ReceiverMode::STOP;
         last_inactive_mode_ = ReceiverMode::STOP;
 
-        carrier_det_.reset(new CarrierDetector(args_));
-        vector<float> template_samples = load_template(FLAGS_template);
-        corr_det_.reset(new CorrDetector(template_samples,
-                                         block_size_,
-                                         history_size_,
-                                         corr_thresh_const,
-                                         corr_thresh_snr));
+        block_idx_ = 0;
+        cycle_ = -1;
+        fargs_.reset(fargs_new());
 
-        synced_signal_ = to_complex_star(synced_fft_calc_.input());
-        synced_fft_ = to_complex_star(synced_fft_calc_.output());
-
-        corr_signal_ = to_complex_star(corr_fft_calc_.input());
-        corr_fft_ = to_complex_star(corr_fft_calc_.output());
-
-        slice_start_ = max(0, slice_start);
-        slice_len_ = (slice_len <= 0) ? corr_size_-slice_start_
-                     : min(corr_size_-slice_start_, (size_t)slice_len);
-
-        setOutput(std::move(out));
+        reloadFlags();
     }
 
     void stop() {
@@ -343,19 +312,17 @@ public:
     // the state transitions to STOP() or to STANDBY()
     void setMode(ReceiverMode new_mode);
 
-    void setOutput(CFile&& out) {
+    void setOutput(std::string filename) {
         assert(isInactiveState(state_));
 
         // Open output file
-        writer_.reset(new CorxFileWriter(std::move(out)));
+        writer_.reset(new CorxFileWriter(CFile(filename)));
 
         // Write header
         writer_->write_file_header({(uint16_t)slice_start_,
                                    (uint16_t)slice_len_});
 
-        // TODO
-        // FLAGS_frequency = filename
-        // printf("Output file set to \"%s\"\n");
+        printf("Output file set to \"%s\"\n", filename.data());
     }
 
     void setFrequency() {
@@ -373,6 +340,10 @@ public:
     // next() should be called repeatedly until it returns false, in
     // which case the receiver will be in the STOPPED state.
     bool next();
+
+    // reset receiver with new flags
+    // Should only ever be called in the STOPPED state
+    void reloadFlags();
 
 protected:
     // State transitions should only happend from within the next() function
@@ -401,13 +372,13 @@ protected:
     // frequency. It is assumed that the downconverter and ADC have the same
     // local oscillator (i.e. that they are coherent).
     float estimateClockError() {
-        return (carrier_pos_ * args_->sdr_sample_rate / block_size_
-                - FLAGS_carrier_ref) / args_->sdr_freq;
+        return (carrier_pos_ * fargs_->sdr_sample_rate / block_size_
+                - FLAGS_carrier_ref) / fargs_->sdr_freq;
     }
 
     // Set bias tee, i.e. enable or disable preamp
     bool setBiasTee(bool on) {
-        if (strcmp(args_->input_file, "rtlsdr") != 0) {
+        if (strcmp(fargs_->input_file, "rtlsdr") != 0) {
             return false;
         }
 
@@ -423,7 +394,7 @@ protected:
     }
 
     void setStandby(bool on) {
-        if (strcmp(args_->input_file, "rtlsdr") == 0) {
+        if (strcmp(fargs_->input_file, "rtlsdr") == 0) {
             rtlsdr_reader_set_standby(carrier_det_->get()->reader, on);
             BPRINTF("%s",
                     on ? "Input discard enabled\n" : "Input discard disabled\n");
@@ -436,7 +407,7 @@ protected:
             timeout = 0;
         } else {
             timeout = block_idx_;
-            timeout += delta_secs * args_->sdr_sample_rate / nonhistory_size_;
+            timeout += delta_secs * fargs_->sdr_sample_rate / nonhistory_size_;
         }
     }
 
@@ -456,7 +427,7 @@ private:
     ReceiverMode last_inactive_mode_;
 
     // -- Submodules / buffers
-    fargs_t* args_;  // Arguments passed to carrier_det_
+    unique_ptr<fargs_t, decltype(free)*> fargs_ = {NULL, free};
     // Read input and perform carrier detection using fastcard.
     std::unique_ptr<CarrierDetector> carrier_det_;
 
@@ -464,20 +435,20 @@ private:
     std::unique_ptr<CorrDetector> corr_det_;
 
     // Synced signal, i.e. signal after carrier recovery.
-    FFT synced_fft_calc_;
+    std::unique_ptr<FFT> synced_fft_calc_;
     complex<float>* synced_signal_;
     complex<float>* synced_fft_;
 
     // Correlation block buffers.
-    FFT corr_fft_calc_;
+    std::unique_ptr<FFT> corr_fft_calc_;
     complex<float>* corr_signal_;
     complex<float>* corr_fft_;
-    AlignedArray<complex<float>> corrected_corr_fft_;
+    std::unique_ptr<AlignedArray<complex<float>>> corrected_corr_fft_;
 
-    // -- Variables that may not change after construction
-    const size_t block_size_;
-    const size_t history_size_;
-    const size_t nonhistory_size_;
+    // -- Variables that may not change after construction (or reload)
+    size_t block_size_;
+    size_t history_size_;
+    size_t nonhistory_size_;
 
     // Correlation block size.
     size_t corr_size_;
@@ -489,7 +460,7 @@ private:
     // -- Variables used by all states
 
     // Number of blocks read.
-    unsigned block_idx_ = 0;
+    unsigned block_idx_;
 
     // Stream for temporary debugging output
     CFile debug_;
@@ -521,7 +492,7 @@ private:
 
     // Correlation block within block of data between subsequent beacons.
     // -1: waiting for first pulse
-    int32_t cycle_ = -1;
+    int32_t cycle_;
     // TODO: assert cycle_ == -1 on destruction
 
     // Output stream.
@@ -558,6 +529,93 @@ private:
     size_t noise_wait_timeout_;
     size_t noise_capture_timeout_;
 };
+
+
+void Receiver::reloadFlags() {
+    assert(state_ == ReceiverState::STOPPED &&
+           mode_ == ReceiverMode::STOP);
+
+    // Parse flags
+    float corr_thresh_const = 0, corr_thresh_snr = 10;
+    if (!parse_theshold_str(FLAGS_beacon_threshold.c_str(),
+                            &corr_thresh_const,
+                            &corr_thresh_snr)) {
+        fprintf(stderr, "Invalid value for --beacon_threshold: %s\n",
+                FLAGS_carrier_window.c_str());
+        // exit(1);
+    }
+
+    int slice_start = 0, slice_len = -1;
+    if (!parse_slice_str(FLAGS_slice,
+                         FLAGS_segment_size,
+                         slice_start,
+                         slice_len)) {
+        fprintf(stderr, "Invalid value for --slice: %s\n",
+                FLAGS_carrier_window.c_str());
+        // exit(1);
+    }
+
+    // Parse fargs (fastcard settings)
+    fargs_->input_file = FLAGS_input.c_str();
+    fargs_->wisdom_file = FLAGS_wisdom.c_str();
+    if (!parse_carrier_str(FLAGS_carrier_window.c_str(),
+                           &fargs_->carrier_freq_min,
+                           &fargs_->carrier_freq_max)) {
+        fprintf(stderr,
+                "Invalid value for --carrier_window: %s\n",
+                FLAGS_carrier_window.c_str());
+        // exit(1);
+    }
+    if (!parse_theshold_str(FLAGS_carrier_threshold.c_str(),
+                            &fargs_->threshold_const,
+                            &fargs_->threshold_snr)) {
+        fprintf(stderr,
+                "Invalid value for --carrier_threshold: %s\n",
+                FLAGS_carrier_window.c_str());
+        // exit(1);
+    }
+    fargs_->block_len = FLAGS_block_size;
+    fargs_->history_len = FLAGS_history_size;
+    // fargs->skip = FLAGS_skip;
+
+    fargs_->sdr_freq = (uint32_t)parse_si_float(&FLAGS_frequency[0]);
+    fargs_->sdr_gain = (int)FLAGS_gain * 10; // unit: tenths of a dB
+    fargs_->sdr_sample_rate = (uint32_t)parse_si_float(&FLAGS_sample_rate[0]);
+    fargs_->sdr_dev_index = FLAGS_device_index;
+
+    // Init variables
+    block_size_ = fargs_->block_len;
+    history_size_ = fargs_->history_len;
+    nonhistory_size_ = fargs_->block_len - fargs_->history_len;
+    corr_size_ = FLAGS_segment_size;
+
+    synced_fft_calc_.reset(new FFT(block_size_, true));
+    corr_fft_calc_.reset(new FFT(FLAGS_segment_size, true));
+    corrected_corr_fft_.reset(
+            new AlignedArray<complex<float>>(FLAGS_segment_size));
+
+    carrier_det_.reset();
+    carrier_det_.reset(new CarrierDetector(fargs_.get()));
+    vector<float> template_samples = load_template(FLAGS_template);
+    corr_det_.reset(new CorrDetector(template_samples,
+                                     block_size_,
+                                     history_size_,
+                                     corr_thresh_const,
+                                     corr_thresh_snr));
+    
+    synced_signal_ = to_complex_star(synced_fft_calc_->input());
+    synced_fft_ = to_complex_star(synced_fft_calc_->output());
+    
+    corr_signal_ = to_complex_star(corr_fft_calc_->input());
+    corr_fft_ = to_complex_star(corr_fft_calc_->output());
+    
+    slice_start_ = max(0, slice_start);
+    slice_len_ = (slice_len <= 0) ? corr_size_-slice_start_
+                 : min(corr_size_-slice_start_, (size_t)slice_len);
+    
+    setOutput(FLAGS_output);
+    debug_ = CFile(FLAGS_debug);
+}
 
 
 void Receiver::setMode(ReceiverMode new_mode) {
@@ -658,7 +716,7 @@ void Receiver::setState(ReceiverState new_state) {
             setBiasTee(true);
             // Reset variables
             track_state_ = TrackState::INACTIVE;
-            num_cycles_ = ((FLAGS_beacon_interval * args_->sdr_sample_rate
+            num_cycles_ = ((FLAGS_beacon_interval * fargs_->sdr_sample_rate
                             - 2*FLAGS_beacon_padding) / 
                            corr_size_);
             sample_phase_ = 0;
@@ -1076,7 +1134,7 @@ void Receiver::findBeacon() {
             dc_ampl_,
             avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor);
 
-    synced_fft_calc_.execute();
+    synced_fft_calc_->execute();
     float signal_energy = 0; // TODO: calculate signal_energy
     CorrDetection corr = corr_det_->detect(synced_fft_, signal_energy);
     if (corr.detected) {
@@ -1085,7 +1143,7 @@ void Receiver::findBeacon() {
         prev_soa_ = soa_;
         soa_ = (nonhistory_size_ * block_idx_
                 + corr.peak_idx + corr.peak_offset);
-        float time_step = (soa_ - prev_soa_) / args_->sdr_sample_rate;
+        float time_step = (soa_ - prev_soa_) / fargs_->sdr_sample_rate;
 
         if ((beacon_ > 0) && (time_step > 1.5 * FLAGS_beacon_interval)) {
             // We missed a pulse. Estimate beacon index from sample index.
@@ -1132,17 +1190,17 @@ bool Receiver::captureCorrSegments() {
                corr_size_ * sizeof(complex<float>));
 
         // calculate FFT
-        corr_fft_calc_.execute();
+        corr_fft_calc_->execute();
 
         // correct for complex phase offset and time offset
-        fft_shift(corrected_corr_fft_.data(),
+        fft_shift(corrected_corr_fft_->data(),
                   corr_fft_,
                   corr_size_,
                   start - start_idx,
                   -avg_dc_angle_,
                   -carrier_pos_ * corr_size_ / block_size_);
 
-        DeciAngle error = arg(corrected_corr_fft_.data()[0]) / 2 / PI;
+        DeciAngle error = arg(corrected_corr_fft_->data()[0]) / 2 / PI;
         if (abs(error) > 0.2) {
             num_phase_errors_++;
         }
@@ -1157,46 +1215,13 @@ bool Receiver::captureCorrSegments() {
         // Dump to output file
         int8_t error_fp = error / 0.5 * 127;
         writer_->write_cycle_block(error_fp,
-                                  corrected_corr_fft_.data()+slice_start_,
+                                  corrected_corr_fft_->data()+slice_start_,
                                   slice_len_);
     }
 
     return (cycle_ < num_cycles_);
 }
 
-
-///////////////////////////////////////////////////////////////////////////////
-// TODO: move parse_fargs to within Receiver class (to process FLAGS)
-// or to cli.cpp
-
-static void parse_fargs(fargs_t* fargs) {
-    fargs->input_file = FLAGS_input.c_str();
-    fargs->wisdom_file = FLAGS_wisdom.c_str();
-    if (!parse_carrier_str(FLAGS_carrier_window.c_str(),
-                           &fargs->carrier_freq_min,
-                           &fargs->carrier_freq_max)) {
-        fprintf(stderr,
-                "Invalid value for --carrier_window: %s\n",
-                FLAGS_carrier_window.c_str());
-        exit(1);
-    }
-    if (!parse_theshold_str(FLAGS_carrier_threshold.c_str(),
-                            &fargs->threshold_const,
-                            &fargs->threshold_snr)) {
-        fprintf(stderr,
-                "Invalid value for --carrier_threshold: %s\n",
-                FLAGS_carrier_window.c_str());
-        exit(1);
-    }
-    fargs->block_len = FLAGS_block_size;
-    fargs->history_len = FLAGS_history_size;
-    // fargs->skip = FLAGS_skip;
-
-    fargs->sdr_freq = (uint32_t)parse_si_float(&FLAGS_frequency[0]);
-    fargs->sdr_gain = (int)FLAGS_gain * 10; // unit: tenths of a dB
-    fargs->sdr_sample_rate = (uint32_t)parse_si_float(&FLAGS_sample_rate[0]);
-    fargs->sdr_dev_index = FLAGS_device_index;
-}
 
 
 // TODO: move LineReader and InteractiveReceiver to interactive_receiver.cpp
@@ -1290,19 +1315,16 @@ private:
 
 class InteractiveReceiver {
 public:
-    InteractiveReceiver(std::unique_ptr<Receiver>&& detector)
-        : detector_(std::move(detector)) {};
+    InteractiveReceiver() {};
     void run();
     void sigint() { sigint_ = true; }
     void exit() { sigint_ = true; eof_ = true; }
 
 private:
     void executeCommand(std::string line);
-    // TODO: own detector?
-
     bool eof_;
     bool sigint_ = false;
-    std::unique_ptr<Receiver> detector_;
+    Receiver receiver_;
 };
 
 
@@ -1312,8 +1334,8 @@ void InteractiveReceiver::run() {
     bool waiting = false;
 
     while (true) {
-        ReceiverMode mode = detector_->getMode();
-        ReceiverState state = detector_->getState();
+        ReceiverMode mode = receiver_.getMode();
+        ReceiverState state = receiver_.getState();
         bool stopped = (state == ReceiverState::STOPPED &&
                         mode == ReceiverMode::STOP);
 
@@ -1327,7 +1349,7 @@ void InteractiveReceiver::run() {
             if (stopped) {
                 eof_ = true;
             } else {
-                detector_->setMode(ReceiverMode::STOP);
+                receiver_.setMode(ReceiverMode::STOP);
                 printf("Receiver stopped. Press Ctrl-C again to exit.\n");
             }
 
@@ -1348,7 +1370,7 @@ void InteractiveReceiver::run() {
                 if (stopped) {
                     break;
                 } else if (!reader.hasLines()) {
-                    detector_->setMode(ReceiverMode::STOP);
+                    receiver_.setMode(ReceiverMode::STOP);
                 }
             }
 
@@ -1360,7 +1382,7 @@ void InteractiveReceiver::run() {
         }
 
         if (!stopped) {
-            detector_->next();
+            receiver_.next();
             // TODO: check return value?
         }
     }
@@ -1380,17 +1402,17 @@ void InteractiveReceiver::executeCommand(std::string line) {
 
     // Handle command
     transform(command.begin(), command.end(), command.begin(), ::tolower);
-    ReceiverState state = detector_->getState();
+    ReceiverState state = receiver_.getState();
     if (command == "stop") {
-        detector_->stop();
+        receiver_.stop();
     } else if (command == "standby") {
-        detector_->standby();
+        receiver_.standby();
     } else if (command == "lock") {
-        detector_->lock();
+        receiver_.lock();
     } else if (command == "capture") {
-        detector_->capture();
+        receiver_.capture();
     } else if (command == "exit") {
-        detector_->stop();
+        receiver_.stop();
         eof_ = true;
     } else if (command == "output") {
         if (state != ReceiverState::STOPPED &&
@@ -1399,7 +1421,43 @@ void InteractiveReceiver::executeCommand(std::string line) {
                    "in the STOPPED or STANDBY state.\n");
         } else {
             FLAGS_output = argument;
-            detector_->setOutput(CFile(argument));
+            receiver_.setOutput(argument);
+        }
+    } else if (command == "set") {
+        // Use command with extreme care.
+        // The program will exit if an invalid flag is passed.
+        if (state != ReceiverState::STOPPED) {
+            printf("Flags may only be changed in STOPPED state.\n");
+        } else {
+            // Split argument by space
+            std::vector<std::string> args;
+            std::string::size_type pos = 0, offset = 0;
+            while ((pos = argument.find(' ', offset)) != std::string::npos) {
+                args.push_back(argument.substr(offset, pos-offset));
+                offset = pos + 1;
+            }
+            if (offset < argument.size()) {
+                args.push_back(argument.substr(offset));
+            }
+
+            // Parse flags (not the most elegant method)
+            char** argv = new char*[args.size() + 1];
+            argv[0] = new char[1];
+            argv[0][0] = '\0';
+            for (size_t i = 0; i < args.size(); i++) {
+                argv[i + 1] = new char[args[i].size() + 1];
+                memcpy(argv[i + 1], args[i].c_str(), args[i].size());
+                argv[i + 1][args[i].size()] = '\0';
+                // argv[i + 1] = (char*) args[i].c_str();
+            }
+            int argc = args.size() + 1;
+            gflags::ParseCommandLineFlags(&argc, &argv, false);
+            printf("%f %s\n", FLAGS_timeout, FLAGS_slice.data());
+
+            for (size_t i = 0; i < args.size() + 1; i++) {
+                delete[] argv[i];
+            }
+            delete[] argv;
         }
     } else {
         if (command != "help") {
@@ -1407,10 +1465,10 @@ void InteractiveReceiver::executeCommand(std::string line) {
         }
         printf("Valid commands: stop standby lock capture output exit help\n");
     }
-    // output <new_filename>
-    //   may be changed in STOPPED or STANDBY state only
     // freq <new_freq>
     //   may be changed in STOPPED or STANDBY state only
+    // gain <new_gain>
+    // wait
     // set <new_flags>
     //   reconstruct detector after set command
     //   may be changed in STOPPED state only
@@ -1447,41 +1505,11 @@ DEFINE_bool(interactive, false, "Use stdin for controlling the receiver with "
 int main(int argc, char **argv) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-    // TODO: move arg parsing to detector class!
-    unique_ptr<fargs_t, decltype(free)*> args = {NULL, free};
-    args.reset(fargs_new());
-    parse_fargs(args.get());
-
-    float arg_corr_thresh_const, arg_corr_thresh_snr ;
-    if (!parse_theshold_str(FLAGS_beacon_threshold.c_str(),
-                            &arg_corr_thresh_const,
-                            &arg_corr_thresh_snr)) {
-        fprintf(stderr, "Invalid value for --beacon_threshold: %s\n",
-                FLAGS_carrier_window.c_str());
-        exit(1);
-    }
-
-    int slice_start, slice_len;
-    if (!parse_slice_str(FLAGS_slice,
-                         FLAGS_segment_size,
-                         slice_start,
-                         slice_len)) {
-        fprintf(stderr, "Invalid value for --slice: %s\n",
-                FLAGS_carrier_window.c_str());
-        exit(1);
-    }
-
     if (argc > 1) {
         fprintf(stderr, "We do not take positional arguments\n");
         exit(1);
     }
-
-    receiver.reset(new Receiver(args.get(),
-                                arg_corr_thresh_const,
-                                arg_corr_thresh_snr,
-                                slice_start,
-                                slice_len,
-                                CFile(FLAGS_output)));
+    // TODO: validate format of flags
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -1490,14 +1518,13 @@ int main(int argc, char **argv) {
 
     try {
         if (!FLAGS_interactive) {
+            receiver.reset(new Receiver());
             receiver->capture();
             while (receiver->next()) {}
         } else {
-            interactive_receiver.reset(
-                    new InteractiveReceiver(std::move(receiver)));
+            interactive_receiver.reset(new InteractiveReceiver());
             interactive_receiver->run();
         }
-
     } catch (FastcardException& e) {
         cerr << e.what() << endl;
         return e.getCode();
