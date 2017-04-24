@@ -13,6 +13,8 @@
 
 #include "corx_file_writer.h"
 
+namespace corx {
+
 void CorxFileWriter::write_file_header(const CorxFileHeader &header) {
     if (is_void()) {
         return;
@@ -76,3 +78,5 @@ void CorxFileWriter::write_cycle_block_internal(int8_t phase_error,
            len,
            out_.file());
 }
+
+} // namespace corx

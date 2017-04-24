@@ -5,6 +5,8 @@
 #include <fastdet/fastcard_wrappers.h>
 #include "corx_file_format.h"
 
+namespace corx {
+
 class CorxFileWriter {
   public:
     CorxFileWriter(CFile&& out)
@@ -27,5 +29,7 @@ class CorxFileWriter {
     int slice_size_;
     const static uint8_t version = 0x01;
 };
+
+} // namespace corx
 
 #endif /* CORX_FILE_WRITER_H */
