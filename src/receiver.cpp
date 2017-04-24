@@ -39,6 +39,9 @@ using namespace std;
 
 #define PI 3.14159265358979323846
 
+// printf with block ID prepended
+#define BPRINTF(fmt, ...) printf("[#%u] " fmt, block_idx_, ##__VA_ARGS__)
+
 namespace corx {
 // TODO: Writer should also be in corx namespace
 
@@ -322,6 +325,8 @@ public:
 
     const char* trackStateToString(TrackState state) {
         switch (state) {
+            case TrackState::INACTIVE:
+                return "INACTIVE";
             case TrackState::FIND_CARRIER:
                 return "FIND_CARRIER";
             case TrackState::LOCKED:
@@ -408,8 +413,7 @@ protected:
 
 #ifdef LIBRTLSDR_BIAS_TEE_SUPPORT
         rtlsdr_reader_set_bias_tee(carrier_det_->get()->reader, on);
-        printf("block #%d: ", block_idx_);
-        printf(on ? "Enabled bias tee\n" : "Disabled bias tee\n");
+        BPRINTF("%s", on ? "Enabled bias tee\n" : "Disabled bias tee\n");
         // TODO: clear buffers
         // printf("Cleared buffers");
         return true;
@@ -421,7 +425,8 @@ protected:
     void setStandby(bool on) {
         if (strcmp(args_->input_file, "rtlsdr") == 0) {
             rtlsdr_reader_set_standby(carrier_det_->get()->reader, on);
-            printf(on ? "Input discard enabled\n" : "Input discard disabled\n");
+            BPRINTF("%s",
+                    on ? "Input discard enabled\n" : "Input discard disabled\n");
         }
     }
 
@@ -567,10 +572,9 @@ void Receiver::setMode(ReceiverMode new_mode) {
         last_inactive_mode_ = mode_;
     }
 
-    printf("block #%d: MODE changed from %s to %s\n",
-           block_idx_,
-           modeToString(old_mode),
-           modeToString(new_mode));
+    BPRINTF("MODE changed from %s to %s\n",
+            modeToString(old_mode),
+            modeToString(new_mode));
 
     if (new_mode == ReceiverMode::STOP) {
         if (carrier_det_) {
@@ -605,6 +609,8 @@ void Receiver::setState(ReceiverState new_state) {
             }
             // TODO: flush output
 
+            setTrackState(TrackState::INACTIVE);
+
             // Bias tee should be off in all states other than TRACK
             setBiasTee(false);
             break;
@@ -632,10 +638,9 @@ void Receiver::setState(ReceiverState new_state) {
             break;
     }
 
-    printf("block #%d: STATE changed from %s to %s\n",
-           block_idx_,
-           stateToString(old_state),
-           stateToString(new_state));
+    BPRINTF("STATE changed from %s to %s\n",
+            stateToString(old_state),
+            stateToString(new_state));
 
     // -- Actions for changing to new state
     switch (new_state) {
@@ -652,7 +657,7 @@ void Receiver::setState(ReceiverState new_state) {
             // Bias tee should be on in the TRACK state
             setBiasTee(true);
             // Reset variables
-            track_state_ = TrackState::FIND_CARRIER;
+            track_state_ = TrackState::INACTIVE;
             num_cycles_ = ((FLAGS_beacon_interval * args_->sdr_sample_rate
                             - 2*FLAGS_beacon_padding) / 
                            corr_size_);
@@ -673,6 +678,8 @@ void Receiver::setState(ReceiverState new_state) {
             setTimeout(track_timeout_, FLAGS_timeout);
             deactiveTimeout(lock_timeout_);
             deactiveTimeout(capture_timeout_);
+
+            setTrackState(TrackState::FIND_CARRIER);
 
             break;
 
@@ -753,7 +760,11 @@ bool Receiver::next() {
         }
         return false;
     }
-    block_idx_++;
+
+    // Increase block ID in active states
+    if (state_ != ReceiverState::STANDBY) {
+        block_idx_++;
+    }
 
     // Handle states
     switch (state) {
@@ -769,13 +780,14 @@ bool Receiver::next() {
                     isTimeoutExpired(capture_timeout_)) {
 
                 if (isTimeoutExpired(track_timeout_)) {
-                    printf("Track timeout\n");
+                    BPRINTF("Track timeout: "
+                            "maximum time in active state expired\n");
                 }
                 if (isTimeoutExpired(lock_timeout_)) {
-                    printf("Lock timeout\n");
+                    BPRINTF("Lock timeout: could not find carrier\n");
                 }
                 if (isTimeoutExpired(capture_timeout_)) {
-                    printf("Capture timeout\n");
+                    BPRINTF("Capture timeout\n");
                 }
 
                 if (beacon_ == -1) {
@@ -811,7 +823,7 @@ void Receiver::nextNoiseCapture() {
 
     if (cycle_ == -1) {
         // FIXME: copy-pasta
-        printf("block #%d: Capture noise: next cycle\n", block_idx_);
+        BPRINTF("Capture noise: next cycle\n");
 
         soa_ = (nonhistory_size_ * block_idx_);  // FIXME: no padding
 
@@ -891,6 +903,9 @@ void Receiver::setTrackState(TrackState new_state) {
     track_state_ = new_state;
 
     switch (old_state) {
+        case TrackState::INACTIVE:
+            break;
+
         case TrackState::FIND_CARRIER:
             deactiveTimeout(lock_timeout_);
             break;
@@ -911,12 +926,14 @@ void Receiver::setTrackState(TrackState new_state) {
             break;
     }
 
-    printf("block #%d: TRACK state changed from %s to %s\n",
-           block_idx_,
-           trackStateToString(old_state),
-           trackStateToString(new_state));
+    BPRINTF("TRACK state changed from %s to %s\n",
+            trackStateToString(old_state),
+            trackStateToString(new_state));
 
     switch (new_state) {
+        case TrackState::INACTIVE:
+            break;
+
         case TrackState::FIND_CARRIER:
             setTimeout(lock_timeout_, FLAGS_carrier_search_timeout);
             break;
@@ -932,10 +949,9 @@ void Receiver::setTrackState(TrackState new_state) {
             num_phase_errors_ = 0;
 
             if (beacon_ == 0) {
-                printf("block #%u: Found first beacon. "
-                       "Capture mode will expire after %.1f seconds.\n",
-                       block_idx_,
-                       FLAGS_capture_time);
+                BPRINTF("Found first beacon. "
+                        "Capture mode will expire after %.1f seconds.\n",
+                        FLAGS_capture_time);
 
                 setTimeout(capture_timeout_, FLAGS_capture_time);
             }
@@ -958,6 +974,8 @@ void Receiver::setTrackState(TrackState new_state) {
 }
 
 void Receiver::recoverCarrier() {
+    TrackState initial_track_state = track_state_;
+
     //// Carrier tracking and synchronization
     if (track_state_ != TrackState::FIND_CARRIER) {
         freq_shift(synced_signal_,
@@ -974,13 +992,11 @@ void Receiver::recoverCarrier() {
 
         float angle_diff = normalize_deciangle(dc_angle_ - prev_dc_angle_);
 
-        // printf("block #%u: Carrier phase error: %.0f deg\n",
-        //        block_idx_,
-        //        angle_diff * 360);
+        // BPRINTF("Carrier phase error: %.0f deg\n", angle_diff * 360);
 
         if (angle_diff * 360 > FLAGS_max_tracking_phase_diff) {
             // tracking loop failed
-            printf("block #%u: Tracking loop failed\n", block_idx_);
+            BPRINTF("Tracking loop failed\n");
             setTrackState(TrackState::FIND_CARRIER);
         } else {
             // track
@@ -1023,17 +1039,16 @@ void Receiver::recoverCarrier() {
             avg_dc_ampl_ = dc_ampl_ * 2;
             avg_dc_angle_ = dc_angle_;
 
-            printf("block #%u: Detected carrier @ %.3f; SNR: %.1f / %.1f; (DC: %.1f)\n",
-                   block_idx_,
-                   carrier_pos_,
-                   carrier.detection.max,
-                   carrier.detection.noise,
-                   dc_ampl_);
+            BPRINTF("Detected carrier @ %.3f; SNR: %.1f / %.1f; (DC: %.1f)\n",
+                    carrier_pos_,
+                    carrier.detection.max,
+                    carrier.detection.noise,
+                    dc_ampl_);
 
             setTrackState(TrackState::LOCKED);
 
-        } else {
-            printf("block #%u: No carrier detected\n", block_idx_);
+        } else if (initial_track_state != TrackState::FIND_CARRIER) {
+            BPRINTF("No carrier detected\n");
         }
     }
 }
@@ -1056,20 +1071,16 @@ void Receiver::findBeacon() {
         return;
     }
 
-    printf("block #%u: beacon check. "
-           "avg: %.0f; DC: %.0f; thresh: %.0f\n",
-           block_idx_,
-           avg_dc_ampl_,
-           dc_ampl_,
-           avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor);
+    BPRINTF("beacon check. avg: %.0f; DC: %.0f; thresh: %.0f\n",
+            avg_dc_ampl_,
+            dc_ampl_,
+            avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor);
 
     synced_fft_calc_.execute();
     float signal_energy = 0; // TODO: calculate signal_energy
     CorrDetection corr = corr_det_->detect(synced_fft_, signal_energy);
     if (corr.detected) {
-        printf("block #%d: detected beacon (ampl: %.0f)\n",
-               block_idx_,
-               corr.peak_power);
+        BPRINTF("detected beacon (ampl: %.0f)\n", corr.peak_power);
         
         prev_soa_ = soa_;
         soa_ = (nonhistory_size_ * block_idx_

@@ -58,6 +58,7 @@ enum class ReceiverState {
 };
 
 enum class TrackState {
+    INACTIVE,       // not in TRACK state
     FIND_CARRIER,   // searching for carrier
                     // \_ SDR fail -> STOPPED
                     // \_ lock timeout -> STANDBY
