@@ -215,12 +215,6 @@ inline complex<float>* to_complex_star(fcomplex* array) {
 }
 
 
-bool isInactiveState(ReceiverState state) {
-    return (state == ReceiverState::STOPPED ||
-            state == ReceiverState::STANDBY);
-}
-
-
 // TODO: move to header (and user PIMPL?)
 class Receiver {
 public:
@@ -344,6 +338,12 @@ public:
     // reset receiver with new flags
     // Should only ever be called in the STOPPED state
     void reloadFlags();
+
+    // Utility function
+    static bool isInactiveState(ReceiverState state) {
+        return (state == ReceiverState::STOPPED ||
+                state == ReceiverState::STANDBY);
+    }
 
 protected:
     // State transitions should only happend from within the next() function
@@ -1323,6 +1323,7 @@ public:
 private:
     void executeCommand(std::string line);
     bool eof_;
+    bool waiting_;
     bool sigint_ = false;
     Receiver receiver_;
 };
@@ -1331,7 +1332,7 @@ private:
 void InteractiveReceiver::run() {
     LineReader reader;
     eof_ = false;
-    bool waiting = false;
+    waiting_ = false;
 
     while (true) {
         ReceiverMode mode = receiver_.getMode();
@@ -1340,25 +1341,34 @@ void InteractiveReceiver::run() {
                         mode == ReceiverMode::STOP);
 
         if (sigint_) {
-            //  (first Ctrl-C will stop the receiver; second one will exit)
-            waiting = false;
-            while (reader.hasLines()) {
-                reader.popLine();
-            }
-
-            if (stopped) {
-                eof_ = true;
+            //  (first Ctrl-C will stop wait or stop the receiver;
+            //   second one will exit)
+            if (waiting_) {
+                waiting_ = false;
+                printf("Waiting cancelled. Press Ctrl-C again to stop.\n");
             } else {
-                receiver_.setMode(ReceiverMode::STOP);
-                printf("Receiver stopped. Press Ctrl-C again to exit.\n");
+                // Cancel all pending commands
+                while (reader.hasLines()) {
+                    reader.popLine();
+                }
+
+                if (stopped) {
+                    eof_ = true;
+                } else {
+                    receiver_.setMode(ReceiverMode::STOP);
+                    printf("Receiver stopped. Press Ctrl-C again to exit.\n");
+                }
             }
 
             sigint_ = false;
         }
 
-        if (waiting) {
-            // waiting... check mode
-        } else {
+        if (waiting_ && Receiver::isInactiveState(state)) {
+            printf("Done waiting\n");
+            waiting_ = false;
+        } 
+
+        if (!waiting_) {
             if (!eof_) {
                 if (stopped) {
                     printf("corx> ");
@@ -1375,7 +1385,7 @@ void InteractiveReceiver::run() {
             }
 
             // process lines
-            while (reader.hasLines()) {
+            while (reader.hasLines() && !waiting_) {
                 string line = reader.popLine();
                 executeCommand(line);
             }
@@ -1411,6 +1421,11 @@ void InteractiveReceiver::executeCommand(std::string line) {
         receiver_.lock();
     } else if (command == "capture") {
         receiver_.capture();
+    } else if (command == "wait") {
+        printf("Waiting until an inactive state is reached "
+                "(i.e. STOPPED or STANDBY)\n");
+        printf("Press Ctrl-C to cancel wait\n");
+        waiting_ = true;
     } else if (command == "exit") {
         receiver_.stop();
         eof_ = true;
@@ -1452,7 +1467,6 @@ void InteractiveReceiver::executeCommand(std::string line) {
             }
             int argc = args.size() + 1;
             gflags::ParseCommandLineFlags(&argc, &argv, false);
-            printf("%f %s\n", FLAGS_timeout, FLAGS_slice.data());
 
             for (size_t i = 0; i < args.size() + 1; i++) {
                 delete[] argv[i];
@@ -1463,15 +1477,12 @@ void InteractiveReceiver::executeCommand(std::string line) {
         if (command != "help") {
             printf("Invalid command: %s\n", command.data());
         }
-        printf("Valid commands: stop standby lock capture output exit help\n");
+        printf("Valid commands: stop standby lock capture wait output set "
+                "exit help\n");
     }
     // freq <new_freq>
     //   may be changed in STOPPED or STANDBY state only
     // gain <new_gain>
-    // wait
-    // set <new_flags>
-    //   reconstruct detector after set command
-    //   may be changed in STOPPED state only
 }
 
 } // namespace corx
