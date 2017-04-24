@@ -109,6 +109,7 @@ Compile fastcard and fastdet:
 ```
 cd ~
 git clone https://github.com/swkrueger/Thrifty.git thrifty
+git checkout -b corx
 cd ~/thrifty/fastcard
 mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
@@ -143,7 +144,7 @@ Setup repository access:
 
 Cd to home directory and clone repository:
 ```
-git clone git@bitbucket.org:swkrueger/corx.git corx
+git clone git@bitbucket.org:nwu-corx/corx.git corx
 ```
 
 Build
