@@ -109,7 +109,7 @@ DEFINE_double(avg_angle_weight, 0.1,
 DEFINE_double(avg_mag_weight, 0.1,
               "Weighting factor for the Exponential Moving Average of the "
               "carrier magnitude");
-DEFINE_double(beacon_carrier_trigger_factor, 0.8,
+DEFINE_double(beacon_carrier_trigger_factor, 1.1,
               "Only search for presence of a beacon signal when the carrier "
               "magnitude is less than the average carrier magnitude times "
               "this factor.");
@@ -1044,8 +1044,15 @@ void Receiver::findBeacon() {
 
     // use change in signal strength to determine whether it is worth
     // looking for a beacon signal
-    if (dc_ampl_ < avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor) {
-        // Nah, not worth it
+
+    if (FLAGS_beacon_carrier_trigger_factor < 1 &&
+        dc_ampl_ > avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor) {
+        // falling edge trigger
+        return;
+    }
+    if (FLAGS_beacon_carrier_trigger_factor > 1 &&
+        dc_ampl_ < avg_dc_ampl_ * FLAGS_beacon_carrier_trigger_factor) {
+        // rising edge trigger
         return;
     }
 
@@ -1387,7 +1394,7 @@ void InteractiveReceiver::executeCommand(std::string line) {
         if (command != "help") {
             printf("Invalid command: %s\n", command.data());
         }
-        printf("Valid commands: stop standby lock capture exit help\n");
+        printf("Valid commands: stop standby lock capture output exit help\n");
     }
     // output <new_filename>
     //   may be changed in STOPPED or STANDBY state only
