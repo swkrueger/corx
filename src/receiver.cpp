@@ -308,15 +308,7 @@ public:
 
     void setOutput(std::string filename) {
         assert(isInactiveState(state_));
-
-        // Open output file
-        writer_.reset(new CorxFileWriter(CFile(filename)));
-
-        // Write header
-        writer_->write_file_header({(uint16_t)slice_start_,
-                                   (uint16_t)slice_len_});
-
-        printf("Output file set to \"%s\"\n", filename.data());
+        FLAGS_output = filename;
     }
 
     void setFrequency() {
@@ -613,7 +605,7 @@ void Receiver::reloadFlags() {
     slice_len_ = (slice_len <= 0) ? corr_size_-slice_start_
                  : min(corr_size_-slice_start_, (size_t)slice_len);
     
-    setOutput(FLAGS_output);
+    // setOutput(FLAGS_output);
     debug_ = CFile(FLAGS_debug);
 }
 
@@ -762,13 +754,23 @@ void Receiver::setState(ReceiverState new_state) {
     assert(cycle_ == -1);
 
     // -- Actions that should be performed last
-    // // Transition from inactive state
-    // if (isInactiveState(old_state) && !isInactiveState(new_state)) {
-    // }
+    // Transition from inactive state
+    if (isInactiveState(old_state) && !isInactiveState(new_state)) {
+        // Open output file
+        writer_.reset(new CorxFileWriter(CFile(FLAGS_output)));
 
-    // // Transition to inactive state
-    // if (!isInactiveState(old_state) && isInactiveState(new_state)) {
-    // }
+        // Write header
+        writer_->write_file_header({(uint16_t)slice_start_,
+                (uint16_t)slice_len_});
+
+        printf("Opened output file \"%s\"\n", FLAGS_output.data());
+    }
+
+    // Transition to inactive state
+    if (!isInactiveState(old_state) && isInactiveState(new_state)) {
+        writer_.reset();
+        printf("Closed output file\n");
+    }
 
     // Transition from STOPPED
     if (old_state == ReceiverState::STOPPED) {
@@ -1318,7 +1320,7 @@ public:
     InteractiveReceiver() {};
     void run();
     void sigint() { sigint_ = true; }
-    void exit() { sigint_ = true; eof_ = true; }
+    void exit() { sigint_ = true; eof_ = true; waiting_ = false; }
 
 private:
     void executeCommand(std::string line);
@@ -1395,6 +1397,8 @@ void InteractiveReceiver::run() {
             receiver_.next();
             // TODO: check return value?
         }
+        // flush output
+        fflush(stdout);
     }
 }
 
@@ -1483,6 +1487,7 @@ void InteractiveReceiver::executeCommand(std::string line) {
     // freq <new_freq>
     //   may be changed in STOPPED or STANDBY state only
     // gain <new_gain>
+    //   may be changed in STOPPED or STANDBY state only
 }
 
 } // namespace corx
