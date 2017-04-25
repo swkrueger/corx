@@ -32,7 +32,7 @@ Subproc = namedtuple('Subproc', ['rxid', 'proc', 'state'])
 # Args
 CORX_CMD = '../build/corx_rx'
 SUBPROC_LOG = sys.stdout
-INACTIVE_LOG = None
+INACTIVE_LOG_PATH = None
 
 
 
@@ -44,6 +44,7 @@ def create_corx(rxid):
     poller.register(proc.stdout, select.EPOLLHUP | select.EPOLLIN)
     fd = proc.stdout.fileno()
     subprocs[fd] = Subproc(rxid=rxid, proc=proc, state=["STOPPED"])
+    # TODO: pipe and forward stderr
     
     # Do not block read
     # This doesn't work properly with Python 2.x
@@ -92,15 +93,18 @@ def read_corx_stdout(fd):
         # forward output
         SUBPROC_LOG.write("{}|".format(subproc.rxid))
         SUBPROC_LOG.write(line_str)
+        if len(line_str) > 0 and line_str[-1] != '\n':
+            SUBPROC_LOG.write('\n')
     SUBPROC_LOG.flush()
 
     if active_to_inactive:
         print("*** All the receivers are now inactive")
-        if INACTIVE_LOG is not None:
-            print("(write to inactive)\n")
-            INACTIVE_LOG.write("INACTIVE\n")
-            INACTIVE_LOG.flush()
-            # close and reopen to send EOF?
+        if INACTIVE_LOG_PATH is not None:
+            print("(write to inactive -- may block until read)\n")
+            inactive = open(INACTIVE_LOG_PATH, 'w')
+            inactive.write("INACTIVE\n")
+            inactive.flush()
+            inactive.close()  # send EOF
 
 
 def handle_corx_sighup(fd):
@@ -118,7 +122,7 @@ def signal_handler(signum, frame):
 
 
 def _main():
-    global CORX_CMD, SUBPROC_LOG, INACTIVE_LOG
+    global CORX_CMD, SUBPROC_LOG, INACTIVE_LOG_PATH
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--log', type=argparse.FileType('w'),
@@ -126,7 +130,7 @@ def _main():
                         help='File to write output from subprocesses to.')
     parser.add_argument('--corx', type=str, default=CORX_CMD,
                         help='Path to corx program.')
-    parser.add_argument('--inactive', type=argparse.FileType('w'), default=None,
+    parser.add_argument('--inactive', type=str, default=None,
                         help='Write a line to this file when all receivers '
                              'are inactive.')
     parser.add_argument('--num', type=int, default=4,
@@ -134,7 +138,7 @@ def _main():
     args = parser.parse_args()
     SUBPROC_LOG = args.log
     CORX_CMD = args.corx
-    INACTIVE_LOG = args.inactive
+    INACTIVE_LOG_PATH = args.inactive
 
     for rxid in range(args.num):
         create_corx(rxid)

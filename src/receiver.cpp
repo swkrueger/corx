@@ -1476,6 +1476,9 @@ void InteractiveReceiver::executeCommand(std::string line) {
                 delete[] argv[i];
             }
             delete[] argv;
+
+            // reload
+            receiver_.reloadFlags();
         }
     } else {
         if (command != "help") {
