@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+"""Control multiple correlators on a single host in parallel."""
+
+from __future__ import print_function
+
 import fcntl
 import os
 import subprocess
@@ -7,6 +11,7 @@ import select
 import sys
 import re
 import signal
+import socket
 
 from collections import namedtuple
 
@@ -18,7 +23,7 @@ if sys.version_info < (3, 0):
 # Settings
 CORX_ARGS = ['--flagfile=flags.cfg',
              '--input=rtlsdr',
-             '--wisdom=corx{rxid}.wisdom',
+             '--wisdom=/tmp/corx{rxid}.wisdom',
              '--device_index={rxid}',
              '--interactive']
 STATE_REGEX_PATTERN = r'\[#\d+\] STATE changed from [A-Z_]+ to ([A-Z_]+)'
@@ -28,6 +33,10 @@ STATE_REGEX = re.compile(STATE_REGEX_PATTERN)
 poller = select.epoll()
 subprocs = {}
 Subproc = namedtuple('Subproc', ['rxid', 'proc', 'state'])
+
+# Sockets
+server = None  # Socket server
+clients = {}  # Socket clients
 
 # Args
 CORX_CMD = '../build/corx_rx'
@@ -53,14 +62,20 @@ def create_corx(rxid):
     fcntl.fcntl(fd, fcntl.F_SETFL, fcntl_flags | os.O_NONBLOCK)
 
 
+def send_command(cmd):
+    """Send a command to all receivers."""
+    for subproc in subprocs.values():
+        # inject RXID
+        proc_cmd = cmd.format(rxid=subproc.rxid)
+        # send command
+        subproc.proc.stdin.write(proc_cmd.encode())
+        subproc.proc.stdin.flush()
+
+
 def read_stdin():
+    """Forward commands from stdin directly to receivers."""
     for line in sys.stdin:
-        for subproc in subprocs.values():
-            # inject RXID
-            cmd = line.format(rxid=subproc.rxid)
-            # send command
-            subproc.proc.stdin.write(cmd.encode())
-            subproc.proc.stdin.flush()
+        send_command(line)
 
 
 def check_all_inactive():
@@ -100,11 +115,17 @@ def read_corx_stdout(fd):
     if active_to_inactive:
         print("*** All the receivers are now inactive")
         if INACTIVE_LOG_PATH is not None:
-            print("(write to inactive -- may block until read)\n")
+            print("(write to inactive -- may block until read)", end='')
             inactive = open(INACTIVE_LOG_PATH, 'w')
             inactive.write("INACTIVE\n")
             inactive.flush()
             inactive.close()  # send EOF
+            print(" ..done")
+        for client in clients.values():
+            # TODO: only write if requested by client
+            print("(write to socket client -- may block until read)", end='')
+            client.send(b'INACTIVE\n')
+            print(" ..done")
 
 
 def handle_corx_sighup(fd):
@@ -112,7 +133,36 @@ def handle_corx_sighup(fd):
     poller.unregister(fd)
     subproc = subprocs.pop(fd)
     print("RX #{} has stopped".format(subproc.rxid))
-    # TODO: communicate
+
+
+def handle_client_sighup(fd):
+    close_client(fd)
+    print('Client connection closed (HUP)')
+
+
+def handle_client_input(fd):
+    # TODO: buffer input
+    data = clients[fd].recv(1024)
+    if data:
+        start = 0
+        while start < len(data):
+            stop = data.find(b'\n', start)
+            if stop == -1:
+                stop = len(data)-1
+            line = data[start:stop+1]
+            start = stop + 1
+
+            line_str = line.decode().strip() + '\n'
+            send_command(line_str)
+    else:
+        close_client(fd)
+        print('Client connection closed (EOF)')
+
+
+def close_client(fd):
+    poller.unregister(fd)
+    conn = clients.pop(fd)
+    conn.close()
 
 
 def signal_handler(signum, frame):
@@ -135,10 +185,25 @@ def _main():
                              'are inactive.')
     parser.add_argument('--num', type=int, default=4,
                         help='Number of receivers.')
+    parser.add_argument('--socket', action='store_true',
+                        help='Start a TCP server.')
+    parser.add_argument('--host', type=str, default='0.0.0.0',
+                        help='Hostname the socket server should bind to.')
+    parser.add_argument('--port', type=int, default=7331,
+                        help='Port the socker server should bind to.')
     args = parser.parse_args()
     SUBPROC_LOG = args.log
     CORX_CMD = args.corx
     INACTIVE_LOG_PATH = args.inactive
+
+    if args.socket:
+        global server
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setblocking(0)
+        server.bind((args.host, args.port))
+        server.listen(1)
+        poller.register(server.fileno(), select.EPOLLIN)
+        print('Started socket on {}:{}'.format(args.host, args.port))
 
     for rxid in range(args.num):
         create_corx(rxid)
@@ -167,13 +232,27 @@ def _main():
         for fd, event in poller.poll():
             if fd == stdin_fd:
                 read_stdin()
-            else:
+            elif server is not None and fd == server.fileno():
+                conn, address = server.accept()
+                # conn.setblocking(0)
+                fd = conn.fileno()
+                poller.register(fd, select.EPOLLIN)
+                clients[fd] = conn
+                print('New connection from', address)
+            elif fd in subprocs:
                 if event & select.EPOLLIN:
                     read_corx_stdout(fd)
                 if event & select.EPOLLHUP:
                     handle_corx_sighup(fd)
-
-# TODO: handle Ctrl-C properly
+            elif fd in clients:
+                if event & select.EPOLLHUP:
+                    handle_client_sighup(fd)
+                elif event & select.EPOLLIN:
+                    handle_client_input(fd)
+                else:
+                    print("Warning: unknown event from client FD")
+            else:
+                print("Warning: event from unknown FD")
 
 if __name__ == '__main__':
     _main()
