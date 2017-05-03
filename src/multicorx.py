@@ -271,7 +271,7 @@ def _main():
                         help='Number of receivers.')
     parser.add_argument('--socket', action='store_true',
                         help='Start a TCP server.')
-    parser.add_argument('--host', type=str, default='0.0.0.0',
+    parser.add_argument('--host', type=str, default='127.0.0.1',
                         help='Hostname the socket server should bind to.')
     parser.add_argument('--port', type=int, default=7331,
                         help='Port the socker server should bind to.')
