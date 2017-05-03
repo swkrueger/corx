@@ -45,6 +45,7 @@ notify_later = []
 CORX_CMD = '../build/corx_rx'
 SUBPROC_LOG = sys.stdout
 INACTIVE_LOG_PATH = None
+ALLOW_EXEC = False
 
 
 class Subproc(object):
@@ -82,7 +83,9 @@ def create_corx(rxid):
 
 def process_command(line, from_=None):
     """Send a command to all receivers."""
-    cmd = line.strip().split(' ', 1)[0].upper()
+    cmd_args = line.strip().split(' ', 1)
+    cmd = cmd_args[0].upper()
+    args = cmd_args[1] if len(cmd_args) > 1 else ''
 
     if cmd == 'NOTIFY' and from_ in clients:
         # (NOTE: we will never write to a client socket except for
@@ -101,7 +104,16 @@ def process_command(line, from_=None):
         else:
             notify_later.append(from_)
 
+    elif cmd == 'EXEC':
+        if not ALLOW_EXEC:
+            print('Command execution denied. Run multicorx with the '
+                  '--allow-exec flag to enable command execution.')
+        else:
+            print('Execute shell command:', args)
+            subprocess.call(args, shell=True)
+
     else:
+        # Command is for subprocs
         if cmd in ['STOP', 'STANDBY', 'LOCK', 'CAPTURE']:
             for subproc in subprocs.values():
                 if subproc.mode != cmd:
@@ -154,7 +166,7 @@ def read_corx_stdout(fd):
             print("RX #{} changed state to {}"
                   .format(subproc.rxid, new_state))
             print("States:", [p.state for p in subprocs.values()])
-            if (not inactive_before and check_all_inactive()):
+            if not inactive_before and check_all_inactive():
                 active_to_inactive = True
 
         # parse mode
@@ -244,7 +256,7 @@ def signal_handler(signum, frame):
 
 
 def _main():
-    global CORX_CMD, SUBPROC_LOG, INACTIVE_LOG_PATH
+    global CORX_CMD, SUBPROC_LOG, INACTIVE_LOG_PATH, ALLOW_EXEC
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--log', type=argparse.FileType('w'),
@@ -263,10 +275,16 @@ def _main():
                         help='Hostname the socket server should bind to.')
     parser.add_argument('--port', type=int, default=7331,
                         help='Port the socker server should bind to.')
+    parser.add_argument('--allow-exec', dest='allow_exec', action='store_true',
+                        help='Allow arbitrary shell commands to be executed'
+                             'via the EXEC command. WARNING: This will provide'
+                             'full shell access over an insecure channel.'
+                             'Only enable this on a trusted network!')
     args = parser.parse_args()
     SUBPROC_LOG = args.log
     CORX_CMD = args.corx
     INACTIVE_LOG_PATH = args.inactive
+    ALLOW_EXEC = args.allow_exec
 
     if args.socket:
         global server
