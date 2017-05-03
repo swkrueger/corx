@@ -28,22 +28,32 @@ CORX_ARGS = ['--flagfile=flags.cfg',
              '--interactive']
 STATE_REGEX_PATTERN = r'\[#\d+\] STATE changed from [A-Z_]+ to ([A-Z_]+)'
 STATE_REGEX = re.compile(STATE_REGEX_PATTERN)
+MODE_REGEX_PATTERN = r'\[#\d+\] MODE changed from [A-Z_]+ to ([A-Z_]+)'
+MODE_REGEX = re.compile(MODE_REGEX_PATTERN)
 
 # Globals
 poller = select.epoll()
 subprocs = {}
 stderrs = {}
-Subproc = namedtuple('Subproc', ['rxid', 'proc', 'state'])
 
 # Sockets
 server = None  # Socket server
 clients = {}  # Socket clients
+notify_later = []
 
 # Args
 CORX_CMD = '../build/corx_rx'
 SUBPROC_LOG = sys.stdout
 INACTIVE_LOG_PATH = None
 
+
+class Subproc(object):
+    def __init__(self, rxid, proc):
+        self.rxid = rxid
+        self.proc = proc
+        self.state = 'STOPPED'
+        self.dirty_state = False
+        self.mode = 'STOP'
 
 
 def create_corx(rxid):
@@ -57,10 +67,9 @@ def create_corx(rxid):
     poller.register(proc.stdout, select.EPOLLHUP | select.EPOLLIN)
     poller.register(proc.stderr, select.EPOLLIN)
     fd = proc.stdout.fileno()
-    subprocs[fd] = Subproc(rxid=rxid, proc=proc, state=["STOPPED"])
+    subprocs[fd] = Subproc(rxid=rxid, proc=proc)
     errfd = proc.stderr.fileno()
     stderrs[errfd] = subprocs[fd]
-    # TODO: pipe and forward stderr
     
     # Do not block read
     # This doesn't work properly with Python 2.x
@@ -71,28 +80,60 @@ def create_corx(rxid):
     fcntl.fcntl(errfd, fcntl.F_SETFL, fcntl_flags | os.O_NONBLOCK)
 
 
-def send_command(cmd):
+def process_command(line, from_=None):
     """Send a command to all receivers."""
-    for subproc in subprocs.values():
-        # inject RXID
-        proc_cmd = cmd.format(rxid=subproc.rxid)
-        # send command
-        subproc.proc.stdin.write(proc_cmd.encode())
-        subproc.proc.stdin.flush()
+    cmd = line.strip().split(' ', 1)[0].upper()
+
+    if cmd == 'NOTIFY' and from_ in clients:
+        # (NOTE: we will never write to a client socket except for
+        #        inactivity notifications)
+        notify_now = False
+        if check_all_inactive():
+            for subproc in subprocs.values():
+                # State is dirty: wait for state transition
+                if subproc.dirty_state:
+                    break
+            else:
+                notify_now = True
+
+        if notify_now:
+            notify_client(from_)
+        else:
+            notify_later.append(from_)
+
+    else:
+        if cmd in ['STOP', 'STANDBY', 'LOCK', 'CAPTURE']:
+            for subproc in subprocs.values():
+                if subproc.mode != cmd:
+                    subproc.dirty_state = True
+
+        for subproc in subprocs.values():
+            # inject RXID
+            proc_cmd = line.format(rxid=subproc.rxid)
+            # send command
+            subproc.proc.stdin.write(proc_cmd.encode())
+            subproc.proc.stdin.flush()
 
 
 def read_stdin():
     """Forward commands from stdin directly to receivers."""
     for line in sys.stdin:
-        send_command(line)
+        process_command(line)
 
 
 def check_all_inactive():
     for subproc in subprocs.values():
-        if subproc.state[0] not in ("STOPPED", "STANDBY", "DEAD"):
+        if subproc.state not in ("STOPPED", "STANDBY", "DEAD"):
             inactive = False
             return False
     return True
+
+
+def notify_client(client_fd):
+    """Notify a client that all receivers are idling (inactive)."""
+    print("(write to socket client -- may block until read)", end='')
+    clients[client_fd].send(b'INACTIVE\n')
+    print(" ..done")
 
 
 def read_corx_stdout(fd):
@@ -101,18 +142,29 @@ def read_corx_stdout(fd):
     active_to_inactive = False
 
     for line in subproc.proc.stdout:
-        # parse state
         line_str = line.decode()
+
+        # parse state
         m = STATE_REGEX.match(line_str)
         if m:
             new_state = m.groups()[0]
             inactive_before = check_all_inactive()
-            subproc.state[0] = new_state
+            subproc.state = new_state
+            subproc.dirty_state = False
             print("RX #{} changed state to {}"
                   .format(subproc.rxid, new_state))
-            print("States:", [p.state[0] for p in subprocs.values()])
+            print("States:", [p.state for p in subprocs.values()])
             if (not inactive_before and check_all_inactive()):
                 active_to_inactive = True
+
+        # parse mode
+        m = MODE_REGEX.match(line_str)
+        if m:
+            new_mode = m.groups()[0]
+            subproc.mode = new_mode
+            print("RX #{} changed mode to {}"
+                  .format(subproc.rxid, new_mode))
+            print("Modes:", [p.mode for p in subprocs.values()])
 
         # forward output
         SUBPROC_LOG.write("{}|".format(subproc.rxid))
@@ -130,11 +182,10 @@ def read_corx_stdout(fd):
             inactive.flush()
             inactive.close()  # send EOF
             print(" ..done")
-        for client in clients.values():
-            # TODO: only write if requested by client
-            print("(write to socket client -- may block until read)", end='')
-            client.send(b'INACTIVE\n')
-            print(" ..done")
+        for client_fd in notify_later:
+            if client_fd in clients:
+                notify_client(client_fd)
+        notify_later.clear()
 
 
 def read_corx_stderr(fd):
@@ -174,7 +225,7 @@ def handle_client_input(fd):
             start = stop + 1
 
             line_str = line.decode().strip() + '\n'
-            send_command(line_str)
+            process_command(line_str, from_=fd)
     else:
         close_client(fd)
         print('Client connection closed (EOF)')
@@ -220,6 +271,7 @@ def _main():
     if args.socket:
         global server
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.setblocking(0)
         server.bind((args.host, args.port))
         server.listen(1)
@@ -280,6 +332,9 @@ def _main():
                     print("Warning: unknown event from client FD")
             else:
                 print("Warning: event from unknown FD")
+
+    if server is not None:
+        server.close()
 
 if __name__ == '__main__':
     _main()
