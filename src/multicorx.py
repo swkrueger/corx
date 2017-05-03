@@ -32,6 +32,7 @@ STATE_REGEX = re.compile(STATE_REGEX_PATTERN)
 # Globals
 poller = select.epoll()
 subprocs = {}
+stderrs = {}
 Subproc = namedtuple('Subproc', ['rxid', 'proc', 'state'])
 
 # Sockets
@@ -49,10 +50,16 @@ def create_corx(rxid):
     args = [arg.format(rxid=rxid) for arg in CORX_ARGS]
     cmd = [CORX_CMD] + args
     print("Run", cmd)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+    proc = subprocess.Popen(cmd,
+                            stdout=subprocess.PIPE,
+                            stdin=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
     poller.register(proc.stdout, select.EPOLLHUP | select.EPOLLIN)
+    poller.register(proc.stderr, select.EPOLLIN)
     fd = proc.stdout.fileno()
     subprocs[fd] = Subproc(rxid=rxid, proc=proc, state=["STOPPED"])
+    errfd = proc.stderr.fileno()
+    stderrs[errfd] = subprocs[fd]
     # TODO: pipe and forward stderr
     
     # Do not block read
@@ -60,6 +67,8 @@ def create_corx(rxid):
     # (see http://stackoverflow.com/a/1810703)
     fcntl_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
     fcntl.fcntl(fd, fcntl.F_SETFL, fcntl_flags | os.O_NONBLOCK)
+    fcntl_flags = fcntl.fcntl(errfd, fcntl.F_GETFL)
+    fcntl.fcntl(errfd, fcntl.F_SETFL, fcntl_flags | os.O_NONBLOCK)
 
 
 def send_command(cmd):
@@ -126,6 +135,18 @@ def read_corx_stdout(fd):
             print("(write to socket client -- may block until read)", end='')
             client.send(b'INACTIVE\n')
             print(" ..done")
+
+
+def read_corx_stderr(fd):
+    subproc = stderrs[fd]
+    for line in subproc.proc.stderr:
+        # forward output
+        line_str = line.decode()
+        SUBPROC_LOG.write("{}E|".format(subproc.rxid))
+        SUBPROC_LOG.write(line_str)
+        if len(line_str) > 0 and line_str[-1] != '\n':
+            SUBPROC_LOG.write('\n')
+    SUBPROC_LOG.flush()
 
 
 def handle_corx_sighup(fd):
@@ -244,6 +265,12 @@ def _main():
                     read_corx_stdout(fd)
                 if event & select.EPOLLHUP:
                     handle_corx_sighup(fd)
+            elif fd in stderrs:
+                if event & select.EPOLLIN:
+                    read_corx_stderr(fd)
+                if event & select.EPOLLHUP:
+                    poller.unregister(fd)
+                    stderrs.pop(fd)
             elif fd in clients:
                 if event & select.EPOLLHUP:
                     handle_client_sighup(fd)
