@@ -49,7 +49,7 @@ def run():
     addresses = multicorx_remote.parse_addresses(args.remote)
     puppets = multicorx_remote.MultiCorxRemote(addresses)
     puppets.send("standby")
-    puppets.send("exec ./noise.sh initt")  # FIXME
+    puppets.send("exec ./noise.sh init")
     if args.runs < 0:
         while True:
             capture_loop(puppets)

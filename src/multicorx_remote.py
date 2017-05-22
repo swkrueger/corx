@@ -76,12 +76,14 @@ class MultiCorxRemote(object):
             conn.send('NOTIFY\n')
 
         print("Waiting for all receivers to become inactive (idle)")
-        while True:
+        done = False
+        while not done:
             self.poll()
+            done = True
             for notified in self.notified.values():
                 if not notified:
-                    continue
-            break
+                    done = False
+                    break
 
     def num_connections(self):
         return len(self.connections)

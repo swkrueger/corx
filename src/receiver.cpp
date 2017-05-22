@@ -977,8 +977,10 @@ void Receiver::setTrackState(TrackState new_state) {
             break;
 
         case TrackState::CAPTURE:
-            cycle_ = -1;
-            writer_->write_cycle_stop();
+            if (cycle_ >= 0) {
+                cycle_ = -1;
+                writer_->write_cycle_stop();
+            }
             if (num_phase_errors_ > 0) {
                 printf("beacon %d: %d / %d corr blocks have large phase error\n",
                        beacon_, num_phase_errors_, num_cycles_);
