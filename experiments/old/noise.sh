@@ -1,10 +1,5 @@
 #!/bin/bash
 
-set -u
-set -e
-
-source settings.sh
-
 if [ -z ${NOISE_GPIO} ]; then
     echo "NOISE_GPIO env variable should be set"
     exit -1
@@ -32,30 +27,3 @@ function noise_init {
         sudo sh -c "chown odroid:odroid $PIN/value"
     done
 }
-
-function usage {
-    echo "Usage: noise.sh init|on|off"
-}
-
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    if [[ $# -eq 0 ]]; then
-        usage
-        exit 1
-    fi
-
-    case "$1" in
-        init)
-            noise_init
-            ;;
-        on)
-            noise_on $2
-            ;;
-        off)
-            noise_off $2
-            ;;
-        *)
-            usage
-            exit 1
-            ;;
-    esac
-fi

@@ -104,6 +104,16 @@ class MultiCorxRemote(object):
             self.notified[fd] = False
 
 
+def parse_addresses(string):
+    addresses = []
+    for pair in string.split(','):
+        hostport = pair.strip().split(':', 1)
+        host = hostport[0]
+        port = int(hostport[1]) if len(hostport) > 1 else 7331
+        addresses.append((host, port))
+    return addresses
+
+
 def _main():
     import argparse
     parser = argparse.ArgumentParser(
@@ -118,13 +128,7 @@ def _main():
                              ' read commands from stdin until SIGHUP)')
     args = parser.parse_args()
 
-    addresses = []
-    for pair in args.remote.split(','):
-        hostport = pair.strip().split(':', 1)
-        host = hostport[0]
-        port = int(hostport[1]) if len(hostport) > 1 else 7331
-        addresses.append((host, port))
-
+    addresses = parse_addresses(args.remote)
     remote = MultiCorxRemote(addresses)
 
     def run_command(command):

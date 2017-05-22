@@ -46,6 +46,7 @@ CORX_CMD = '../build/corx_rx'
 SUBPROC_LOG = sys.stdout
 INACTIVE_LOG_PATH = None
 ALLOW_EXEC = False
+HOST_ID = 'A'
 
 
 class Subproc(object):
@@ -58,7 +59,7 @@ class Subproc(object):
 
 
 def create_corx(rxid):
-    args = [arg.format(rxid=rxid) for arg in CORX_ARGS]
+    args = [arg.format(rxid=rxid, hostid=HOST_ID) for arg in CORX_ARGS]
     cmd = [CORX_CMD] + args
     print("Run", cmd)
     proc = subprocess.Popen(cmd,
@@ -121,7 +122,8 @@ def process_command(line, from_=None):
 
         for subproc in subprocs.values():
             # inject RXID
-            proc_cmd = line.format(rxid=subproc.rxid)
+            proc_cmd = line.format(rxid=subproc.rxid, hostid=HOST_ID)
+            print(proc_cmd)
             # send command
             subproc.proc.stdin.write(proc_cmd.encode())
             subproc.proc.stdin.flush()
@@ -256,7 +258,7 @@ def signal_handler(signum, frame):
 
 
 def _main():
-    global CORX_CMD, SUBPROC_LOG, INACTIVE_LOG_PATH, ALLOW_EXEC
+    global CORX_CMD, SUBPROC_LOG, INACTIVE_LOG_PATH, ALLOW_EXEC, HOST_ID
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--log', type=argparse.FileType('w'),
@@ -269,6 +271,9 @@ def _main():
                              'are inactive.')
     parser.add_argument('--num', type=int, default=4,
                         help='Number of receivers.')
+    parser.add_argument('--hostid', type=str, default='A',
+                        help='Unique identifier that will replace "{hostid}" '
+                              'in commands.')
     parser.add_argument('--socket', action='store_true',
                         help='Start a TCP server.')
     parser.add_argument('--host', type=str, default='127.0.0.1',
@@ -285,6 +290,7 @@ def _main():
     CORX_CMD = args.corx
     INACTIVE_LOG_PATH = args.inactive
     ALLOW_EXEC = args.allow_exec
+    HOST_ID = args.hostid
 
     if args.socket:
         global server
