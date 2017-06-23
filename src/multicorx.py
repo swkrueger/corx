@@ -151,7 +151,6 @@ def process_command(line, from_=None):
         for subproc in subprocs.values():
             # inject RXID
             proc_cmd = line.format(rxid=subproc.rxid, hostid=HOST_ID)
-            print(proc_cmd)
             # send command
             subproc.proc.stdin.write(proc_cmd.encode())
             subproc.proc.stdin.flush()
@@ -219,7 +218,11 @@ def read_corx_stdout(fd):
             subproc.dirty_state = False
             print("RX #{} changed state to {}"
                   .format(subproc.rxid, new_state))
-            print("States:", [p.state for p in subprocs.values()])
+            sorted_subprocs = sorted(subprocs.values(),
+                                     key=lambda x: x.rxid)
+            state_strs = ["{}={}".format(p.rxid, p.state)
+                          for p in sorted_subprocs]
+            print("States:", ' '.join(state_strs))
             if not inactive_before and check_all_inactive():
                 active_to_inactive = True
 
@@ -230,7 +233,11 @@ def read_corx_stdout(fd):
             subproc.mode = new_mode
             print("RX #{} changed mode to {}"
                   .format(subproc.rxid, new_mode))
-            print("Modes:", [p.mode for p in subprocs.values()])
+            sorted_subprocs = sorted(subprocs.values(),
+                                     key=lambda x: x.rxid)
+            mode_strs = ["{}={}".format(p.rxid, p.mode)
+                         for p in sorted_subprocs]
+            print("Modes:", ' '.join(mode_strs))
 
         # forward output
         SUBPROC_LOG.write("{}|".format(subproc.rxid))

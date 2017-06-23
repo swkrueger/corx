@@ -46,11 +46,13 @@ def capture_loop(puppets):
     for i in range(NUM_NOISE_GENS):
         print("Noise #{} off".format(i))
         puppets.send("exec ./noise.sh off {}".format(i))
+        puppets.wait_exec_done()
         for j in range(NUM_CAPTURE_NOISE_OFF_REPEATS):
             capture(puppets, 'NN')
 
         print("Noise #{} on".format(i))
         puppets.send("exec ./noise.sh on {}".format(i))
+        puppets.wait_exec_done()
         capture(puppets, 'N%d' % i)
 
 
@@ -59,6 +61,7 @@ def run():
     puppets = multicorx_remote.MultiCorxRemote(addresses)
     puppets.send("standby")
     puppets.send("exec ./noise.sh init")
+    puppets.wait_exec_done()
     if args.runs < 0:
         while True:
             capture_loop(puppets)
