@@ -13,7 +13,6 @@ import re
 import signal
 import socket
 
-from collections import namedtuple
 
 # We only support Python 3
 if sys.version_info < (3, 0):
@@ -36,10 +35,15 @@ poller = select.epoll()
 subprocs = {}
 stderrs = {}
 
+exec_procs = {}
+exec_when_idle = []
+notify_exec_done = []  # list of FDs to notify when all exec and
+                       # exec_when_idle jobs are finished
+
 # Sockets
 server = None  # Socket server
 clients = {}  # Socket clients
-notify_later = []
+notify_later = []  # list of FDs to notify when receivers are inactive
 
 # Args
 CORX_CMD = '../build/corx_rx'
@@ -72,7 +76,7 @@ def create_corx(rxid):
     subprocs[fd] = Subproc(rxid=rxid, proc=proc)
     errfd = proc.stderr.fileno()
     stderrs[errfd] = subprocs[fd]
-    
+
     # Do not block read
     # This doesn't work properly with Python 2.x
     # (see http://stackoverflow.com/a/1810703)
@@ -80,6 +84,31 @@ def create_corx(rxid):
     fcntl.fcntl(fd, fcntl.F_SETFL, fcntl_flags | os.O_NONBLOCK)
     fcntl_flags = fcntl.fcntl(errfd, fcntl.F_GETFL)
     fcntl.fcntl(errfd, fcntl.F_SETFL, fcntl_flags | os.O_NONBLOCK)
+
+
+def shell_exec(cmd):
+    proc = subprocess.Popen(cmd,
+                            shell=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    poller.register(proc.stdout, select.EPOLLHUP | select.EPOLLIN)
+    poller.register(proc.stderr, select.EPOLLHUP | select.EPOLLIN)
+
+    fd = proc.stdout.fileno()
+    exec_procs[fd] = proc
+    errfd = proc.stderr.fileno()
+    exec_procs[errfd] = proc
+
+    # Do not block read
+    # This doesn't work properly with Python 2.x
+    # (see http://stackoverflow.com/a/1810703)
+    fcntl_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, fcntl_flags | os.O_NONBLOCK)
+    fcntl_flags = fcntl.fcntl(errfd, fcntl.F_GETFL)
+    fcntl.fcntl(errfd, fcntl.F_SETFL, fcntl_flags | os.O_NONBLOCK)
+
+    pid = proc.pid
+    print('[S{}] Execute shell command:'.format(pid), cmd)
 
 
 def process_command(line, from_=None):
@@ -91,27 +120,26 @@ def process_command(line, from_=None):
     if cmd == 'NOTIFY' and from_ in clients:
         # (NOTE: we will never write to a client socket except for
         #        inactivity notifications)
-        notify_now = False
-        if check_all_inactive():
-            for subproc in subprocs.values():
-                # State is dirty: wait for state transition
-                if subproc.dirty_state:
-                    break
-            else:
-                notify_now = True
-
-        if notify_now:
-            notify_client(from_)
+        if check_all_inactive_nondirty():
+            # notify now
+            notify_client_inactive(from_)
         else:
+            # notify later
             notify_later.append(from_)
 
-    elif cmd == 'EXEC':
+    elif cmd == 'NOTIFY_EXEC':
+        notify_exec_done.append(from_)
+        notify_if_exec_done()
+
+    elif cmd == 'EXEC' or cmd == 'EXEC_WHEN_IDLE':
         if not ALLOW_EXEC:
             print('Command execution denied. Run multicorx with the '
                   '--allow-exec flag to enable command execution.')
         else:
-            print('Execute shell command:', args)
-            subprocess.call(args, shell=True)
+            if cmd == 'EXEC' or check_all_inactive_nondirty():
+                shell_exec(args)
+            else:
+                exec_when_idle.append(args)
 
     else:
         # Command is for subprocs
@@ -138,16 +166,40 @@ def read_stdin():
 def check_all_inactive():
     for subproc in subprocs.values():
         if subproc.state not in ("STOPPED", "STANDBY", "DEAD"):
-            inactive = False
             return False
     return True
 
 
-def notify_client(client_fd):
-    """Notify a client that all receivers are idling (inactive)."""
+def check_all_inactive_nondirty():
+    if check_all_inactive():
+        for subproc in subprocs.values():
+            # State is dirty: wait for state transition
+            if subproc.dirty_state:
+                break
+        else:
+            return True
+    return False
+
+
+def notify_client(client_fd, msg):
     print("(write to socket client -- may block until read)", end='')
-    clients[client_fd].send(b'INACTIVE\n')
+    clients[client_fd].send(msg)
     print(" ..done")
+
+
+def notify_client_inactive(client_fd):
+    """Notify a client that all receivers are idling (inactive)."""
+    notify_client(client_fd, b'INACTIVE\n')
+
+
+def notify_if_exec_done():
+    """Notify clients that all exec and exec_when_idle jobs are done."""
+    if len(exec_when_idle) == 0 and len(exec_procs) == 0:
+        print("*** All the exec jobs are done.")
+        for client_fd in notify_exec_done:
+            if client_fd in clients:
+                notify_client(client_fd, b'EXEC_DONE\n')
+        notify_exec_done.clear()
 
 
 def read_corx_stdout(fd):
@@ -198,8 +250,15 @@ def read_corx_stdout(fd):
             print(" ..done")
         for client_fd in notify_later:
             if client_fd in clients:
-                notify_client(client_fd)
+                notify_client_inactive(client_fd)
         notify_later.clear()
+
+        if len(exec_when_idle) > 0:
+            print("Executing pending exec_when_idle jobs...")
+            for cmd in exec_when_idle:
+                shell_exec(cmd)
+            exec_when_idle.clear()
+            # TODO: notify_exec
 
 
 def read_corx_stderr(fd):
@@ -214,11 +273,41 @@ def read_corx_stderr(fd):
     SUBPROC_LOG.flush()
 
 
+def read_exec_output(fd):
+    proc = exec_procs[fd]
+    stderr = (proc.stderr.fileno() == fd)
+    stream = proc.stderr if stderr else proc.stdout
+
+    for line in stream:
+        # forward output
+        line_str = line.decode()
+        SUBPROC_LOG.write("[S{}]{}|".format(proc.pid,
+                                            'E' if stderr else ''))
+        SUBPROC_LOG.write(line_str)
+        if len(line_str) > 0 and line_str[-1] != '\n':
+            SUBPROC_LOG.write('\n')
+
+    SUBPROC_LOG.flush()
+
+
 def handle_corx_sighup(fd):
     # process ended
     poller.unregister(fd)
     subproc = subprocs.pop(fd)
     print("RX #{} has stopped".format(subproc.rxid))
+
+
+def handle_exec_sighup(fd):
+    poller.unregister(fd)
+    proc = exec_procs.pop(fd)
+    stderr = (proc.stderr.fileno() == fd)
+    if not stderr:
+        pid = proc.pid
+        proc.poll()
+        retcode = proc.returncode
+        print('[S{}] Shell command exited with return code {}'
+              .format(pid, retcode))
+    notify_if_exec_done()
 
 
 def handle_client_sighup(fd):
@@ -273,7 +362,7 @@ def _main():
                         help='Number of receivers.')
     parser.add_argument('--hostid', type=str, default='A',
                         help='Unique identifier that will replace "{hostid}" '
-                              'in commands.')
+                             'in commands.')
     parser.add_argument('--socket', action='store_true',
                         help='Start a TCP server.')
     parser.add_argument('--host', type=str, default='127.0.0.1',
@@ -347,6 +436,11 @@ def _main():
                 if event & select.EPOLLHUP:
                     poller.unregister(fd)
                     stderrs.pop(fd)
+            elif fd in exec_procs:
+                if event & select.EPOLLIN:
+                    read_exec_output(fd)
+                if event & select.EPOLLHUP:
+                    handle_exec_sighup(fd)
             elif fd in clients:
                 if event & select.EPOLLHUP:
                     handle_client_sighup(fd)

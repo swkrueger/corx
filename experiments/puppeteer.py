@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+"""Overlord that commands and controls all the tiles."""
+
 import sys
 import time
 
@@ -9,24 +11,31 @@ import multicorx_remote
 NUM_CAPTURE_NOISE_OFF_REPEATS = 1
 NUM_NOISE_GENS = 4
 
+
 def capture(puppets, noise_type):
     date = time.strftime('%Y%m%d_%H%M%S')
     filename_common = "{corx_path}/{date}_{noise_type}_rx".format(
-                       corx_path=args.corx_path,
-                       date=date,
-                       noise_type=noise_type)
+        corx_path=args.corx_path,
+        date=date,
+        noise_type=noise_type)
     filename = filename_common + "{hostid}{rxid}.corx"
 
     puppets.send("output " + filename)
     puppets.send("capture")
-    puppets.wait_idle()
 
-    # upload data...
+    # let each host upload its data directly after finish capturing
     if args.upload_server != '':
-        puppets.send("exec upload_client/upload.sh "
+        puppets.send("exec_when_idle upload_client/upload.sh "
                      "{upload_server} {files}*.corx"
                      .format(upload_server=args.upload_server,
                              files=filename_common))
+
+    # wait for receivers to finish capturing data
+    puppets.wait_idle()
+
+    # wait for data to be uploaded
+    if args.upload_server != '':
+        puppets.wait_exec_done()
 
     # delete old data...
     if not args.keep:

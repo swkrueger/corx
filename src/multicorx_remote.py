@@ -29,6 +29,7 @@ from __future__ import print_function
 import select
 import socket
 
+
 class MultiCorxRemote(object):
     def __init__(self, addresses):
         self.poller = select.epoll()
@@ -50,7 +51,7 @@ class MultiCorxRemote(object):
         for conn in self.connections.values():
             conn.send(command + '\n')
 
-    def poll(self, timeout=-1):
+    def poll(self, timeout=-1, notify_reply=None):
         for fd, event in self.poller.poll(timeout=timeout):
             if fd in self.connections:
                 if event & select.EPOLLHUP:
@@ -63,27 +64,39 @@ class MultiCorxRemote(object):
                         self._close_connection(fd)
                     else:
                         for line in data.split('\n'):
-                            if line == 'INACTIVE':
-                                print("[{}] Inactive".format(fd))
+                            if line == notify_reply:
+                                print("[{}] {}".format(fd, notify_reply))
                                 self.notified[fd] = True
 
-    def wait_idle(self):
+    def _wait_notify(self, notify_cmd):
         # handle any pending reads or SIGHUPs
         self.poll(0)
         # ask multicorx to notify us
         self._clear_notified()
-        for conn in self.connections.values():
-            conn.send('NOTIFY\n')
 
-        print("Waiting for all receivers to become inactive (idle)")
+        for conn in self.connections.values():
+            conn.send(notify_cmd + '\n')
+
+        notify_reply = 'INACTIVE' if notify_cmd == 'NOTIFY' else 'EXEC_DONE'
+
         done = False
         while not done:
-            self.poll()
+            self.poll(notify_reply=notify_reply)
             done = True
             for notified in self.notified.values():
                 if not notified:
                     done = False
                     break
+
+    def wait_idle(self):
+        print("Waiting for all receivers to become inactive (idle)")
+        self._wait_notify('NOTIFY')
+        print("Done waiting")
+
+    def wait_exec_done(self):
+        print("Waiting for all receivers to finish their EXEC jobs")
+        self._wait_notify('NOTIFY_EXEC')
+        print("Done waiting")
 
     def num_connections(self):
         return len(self.connections)
@@ -119,8 +132,8 @@ def parse_addresses(string):
 def _main():
     import argparse
     parser = argparse.ArgumentParser(
-            description=__doc__,
-            formatter_class=argparse.RawDescriptionHelpFormatter)
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--remote', '-r', type=str, default='127.0.0.1:7331',
                         help='multicorx servers to connect to as a '
                              'comma-separated list of IP:PORT pairs '
@@ -136,6 +149,8 @@ def _main():
     def run_command(command):
         if command.strip().upper() == 'WAIT':
             remote.wait_idle()
+        elif command.strip().upper() == 'WAIT_EXEC':
+            remote.wait_exec_done()
         else:
             remote.send(command)
 
