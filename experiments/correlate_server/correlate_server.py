@@ -9,6 +9,7 @@ import select
 import subprocess
 import sys
 import time
+from datetime import datetime
 from collections import deque
 
 # Constants
@@ -75,7 +76,8 @@ def add_corr_task(group_key, filename1, filename2):
     work_queue.append((group_key, filename1, filename2))
 
 
-def get_group_key(path):
+def get_group_key_mtime(path):
+    """Group .corx files based on their modification time."""
     mtime = int(os.path.getmtime(path))  # getmtime returns a float timestamp
     if len(groups) == 0:
         return mtime
@@ -86,6 +88,19 @@ def get_group_key(path):
         return keys[nearest]
     else:
         return mtime
+
+
+def get_group_key_prefix(path):
+    """Group .corx files based on a date_time prefix in their filenames."""
+    filename = os.path.basename(path)
+    prefixes = filename.split('_', 2)
+    if len(prefixes) != 3:
+        print('Invalid filename: could not extract date_time prefix from "{}"'
+              .format(path))
+        return filename
+    datestr = prefixes[0] + '_' + prefixes[1]
+    date = datetime.strptime(datestr, '%Y%m%d_%H%M%S')
+    return int(time.mktime(date.timetuple()))
 
 
 def _extract_filename_field(filename, idx):
@@ -110,7 +125,7 @@ def add_corx(filename):
         print("Skipping {}: not a file or file does not exist".format(filename))
         return
 
-    group_key = get_group_key(path)
+    group_key = get_group_key_prefix(path)
     is_new_group = group_key not in groups
     if is_new_group:
         groups[group_key] = []

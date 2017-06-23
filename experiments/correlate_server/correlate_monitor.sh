@@ -11,6 +11,7 @@ CORR_DIR="/tmp/corr"
 
 if [ ! -d "${CORX_DIR}" ]; then
     echo "${CORX_DIR} does not exist or isn't a directory"
+    exit 1
 fi
 
 if [ ! -d "${CORR_DIR}" ]; then
