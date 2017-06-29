@@ -136,15 +136,9 @@ sudo apt install python-numpy python-matplotlib
 Install linrad?
 
 ## Install Corx
-Setup repository access:
-
- - Generate SSH key: run `ssh-keygen`
- - Copy public key: `cat ~/.ssh/id_rsa.pub`
- - Add key to deployment keys
-
 Cd to home directory and clone repository:
 ```
-git clone git@bitbucket.org:nwu-corx/corx.git corx
+git clone https://github.com/swkrueger/corx.git corx
 ```
 
 Build
