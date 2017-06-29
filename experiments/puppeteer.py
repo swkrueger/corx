@@ -25,7 +25,7 @@ def capture(puppets, noise_type):
 
     # let each host upload its data directly after finish capturing
     if args.upload_server != '':
-        puppets.send("exec_when_idle ftp_upload_client.sh "
+        puppets.send("exec_when_idle ./ftp_upload_client.sh "
                      "{upload_server} {files}*.corx"
                      .format(upload_server=args.upload_server,
                              files=filename_common))

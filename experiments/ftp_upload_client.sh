@@ -1,6 +1,5 @@
 #!/bin/bash
 
-set -e
 shopt -s nullglob
 
 ftp-upload --version >/dev/null 2>/dev/null
